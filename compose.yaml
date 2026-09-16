@@ -1,0 +1,15 @@
+services:
+  orbital:
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4174:4174"
+    volumes:
+      - orbital-data:/app/data
+    environment:
+      HOST: 0.0.0.0
+      PORT: 4174
+      # For an HTTPS reverse proxy, set PUBLIC_ORIGIN to its exact external origin.
+volumes:
+  orbital-data:

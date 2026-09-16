@@ -1,0 +1,5 @@
+data
+backups
+*.log
+.git
+node_modules

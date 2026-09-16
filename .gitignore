@@ -1,0 +1,22 @@
+data/
+backups/
+*.log
+node_modules/
+
+# Local configuration and private runtime artifacts
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+exports/
+coverage/
+.DS_Store
+Thumbs.db
