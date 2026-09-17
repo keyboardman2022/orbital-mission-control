@@ -65,3 +65,12 @@ test('black hole origin indicator stays in the map at every zoom, including when
   }
  }
 });
+test('following a moving satellite keeps it at the viewport target without changing zoom',()=>{
+ for(const zoom of [1e-7,.5,2]){
+  let view=Camera.view(1000,620,zoom);const target={x:500,y:322};
+  for(const point of [{x:600,y:-30},{x:1e8,y:2e8}]){
+   const before=view.scale;view=Camera.followAt(view,point,target);const p=Camera.toScreen(point.x,point.y,view);
+   assert.ok(Math.hypot(p.x-target.x,p.y-target.y)<1e-6);assert.equal(view.scale,before);
+  }
+ }
+});

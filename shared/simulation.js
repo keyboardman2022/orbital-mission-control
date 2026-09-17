@@ -9,6 +9,9 @@
   const MODEL = Object.freeze({
     version: 'pw-2d-v1', mu: 2000000, rs: 66, captureRadius: 69.3,
     tickRate: 240, step: 1 / 240,
+    dynamics: Object.freeze({version:'two-body-pw-v1',maxMassKg:1e30,centralMassKg:units.centralMassKg,
+      referenceFrame:'satellite position and velocity relative to its independent black hole',
+      approximation:'finite-mass extension of PW pair potential; not GR, no satellite-satellite forces'}),
     limits: Object.freeze({ maxRadius: 1e9, maxSpeed: 1000, maxMassKg: 1e12, minRadius: 80 }),
     calibration: units?.SCALE,
     units: Object.freeze({ length: 'scene length', time: 'simulation second', mass: 'kg', speed: 'scene length / simulation second', angle: 'degrees; +X = 0, counterclockwise; +Y up' })
@@ -26,31 +29,35 @@
       return {...normalized,calibration:units.SCALE};
     }
     if (input.modelVersion !== undefined && input.modelVersion !== MODEL.version) fail('Model version conflict', 409);
-    if (typeof input.name !== 'string' || !input.name.trim() || Array.from(input.name.trim()).length > 64) fail('Name must contain 1–64 characters');
+    if(input.dynamicsVersion!==undefined&&input.dynamicsVersion!==MODEL.dynamics.version)fail('Dynamics version conflict',409);
+    if (typeof input.name !== 'string' || (!input.name.trim()&&!input.dynamicsVersion) || Array.from(input.name.trim()).length > 64) fail('Name must contain at most 64 characters; leave blank for automatic naming');
     const { massKg, speed, directionDeg } = input;
     const { x, y } = input.position || {};
     if (![x, y, massKg, speed, directionDeg].every(Number.isFinite)) fail('All numeric parameters must be finite numbers');
     const r = Math.hypot(x, y), limits = MODEL.limits;
     if (r < limits.minRadius || r > limits.maxRadius || r <= MODEL.captureRadius) fail('Position is outside the validated launch range');
-    if (massKg <= 0 || massKg > limits.maxMassKg) fail('Mass is outside the validated range');
+    if (massKg <= 0 || massKg > (input.dynamicsVersion?MODEL.dynamics.maxMassKg:limits.maxMassKg)) fail('Mass is outside the validated range');
     if (speed < 0 || speed > limits.maxSpeed) fail('Speed is outside the validated range');
     const angle = ((directionDeg % 360) + 360) % 360, radians = angle * Math.PI / 180;
     return { name: input.name.trim(), position: { x, y }, massKg, speed, directionDeg: angle,
       vx: speed * Math.cos(radians), vy: speed * Math.sin(radians), modelVersion: MODEL.version,
+      ...(input.dynamicsVersion?{dynamicsVersion:input.dynamicsVersion}:{}),
       ...(input.calibration?.version === units?.SCALE.version ? {calibration:units.SCALE} : {}) };
   }
   function createState(initial, options = {}) {
     const p = validateLaunch(initial);
     return { x: p.position.x, y: p.position.y, vx: p.vx, vy: p.vy, tick: 0,
       status: 'active', elapsedSeconds: 0, escapeRadius: Math.max(1200, Math.hypot(p.position.x, p.position.y) * 3), event: null,
+      ...(p.dynamicsVersion?{gravitationalMu:effectiveMu(p.massKg),dynamicsVersion:p.dynamicsVersion}:{}),
       ...(options.continuousTracking ? {continuousTracking:true} : {}) };
   }
-  function circularSpeed(r) { return Math.sqrt(MODEL.mu * r) / (r - MODEL.rs); }
-  function escapeSpeed(r) { return Math.sqrt(2 * MODEL.mu / (r - MODEL.rs)); }
-  function energy(s) { return (s.vx * s.vx + s.vy * s.vy) / 2 - MODEL.mu / (Math.hypot(s.x, s.y) - MODEL.rs); }
+  function effectiveMu(massKg) {return MODEL.mu*(1+massKg/units.centralMassKg);}
+  function circularSpeed(r,mu=MODEL.mu) { return Math.sqrt(mu * r) / (r - MODEL.rs); }
+  function escapeSpeed(r,mu=MODEL.mu) { return Math.sqrt(2 * mu / (r - MODEL.rs)); }
+  function energy(s) { return (s.vx * s.vx + s.vy * s.vy) / 2 - (s.gravitationalMu??MODEL.mu) / (Math.hypot(s.x, s.y) - MODEL.rs); }
   function angularMomentum(s) { return s.x * s.vy - s.y * s.vx; }
-  function acceleration(x, y) {
-    const r = Math.hypot(x, y), factor = -MODEL.mu / (r * (r - MODEL.rs) ** 2);
+  function acceleration(x, y,mu=MODEL.mu) {
+    const r = Math.hypot(x, y), factor = -mu / (r * (r - MODEL.rs) ** 2);
     return { x: x * factor, y: y * factor };
   }
   // Sorted roots detect an entering segment even when it exits on the far side.
@@ -76,21 +83,21 @@
     if (![s.x, s.y, s.vx, s.vy, s.escapeRadius, energy(s)].every(Number.isFinite) || !Number.isSafeInteger(oldTick) || oldTick < 0 || oldTick >= Number.MAX_SAFE_INTEGER) {
       return finish(s, 'error', 0, Number.isSafeInteger(oldTick) && oldTick >= 0 ? oldTick : 0);
     }
-    const dt = MODEL.step, a = acceleration(s.x, s.y);
+    const dt = MODEL.step,mu=s.gravitationalMu??MODEL.mu, a = acceleration(s.x, s.y,mu);
     const hx = s.vx + a.x * dt / 2, hy = s.vy + a.y * dt / 2;
     const nx = s.x + hx * dt, ny = s.y + hy * dt;
     if (![hx, hy, nx, ny].every(Number.isFinite)) return finish(s, 'error', 0, oldTick);
     const capture = crossing(s.x, s.y, nx, ny, MODEL.captureRadius, false);
     if (capture !== null) {
       const x = s.x + (nx - s.x) * capture, y = s.y + (ny - s.y) * capture;
-      const b = acceleration(x, y), h = dt * capture;
+      const b = acceleration(x, y,mu), h = dt * capture;
       const vx = s.vx + (a.x + b.x) * h / 2, vy = s.vy + (a.y + b.y) * h / 2;
       if (![x, y, vx, vy].every(Number.isFinite)) return finish(s, 'error', 0, oldTick);
       Object.assign(s, { x, y, vx, vy });
       return finish(s, 'captured', capture, oldTick);
     }
-    const b = acceleration(nx, ny), vx = hx + b.x * dt / 2, vy = hy + b.y * dt / 2;
-    const next = { x: nx, y: ny, vx, vy };
+    const b = acceleration(nx, ny,mu), vx = hx + b.x * dt / 2, vy = hy + b.y * dt / 2;
+    const next = { x: nx, y: ny, vx, vy,...(s.gravitationalMu!==undefined?{gravitationalMu:mu}:{}) };
     if (![vx, vy, energy(next)].every(Number.isFinite)) return finish(s, 'error', 0, oldTick);
     if (!s.continuousTracking && Math.hypot(nx, ny) >= s.escapeRadius && nx * vx + ny * vy > 0 && energy(next) > 0) {
       const fraction = crossing(s.x, s.y, nx, ny, s.escapeRadius, true) ?? 1;
@@ -105,5 +112,5 @@
     return { tick: s.tick, elapsedSeconds: s.elapsedSeconds, x: s.x, y: s.y, vx: s.vx, vy: s.vy,
       kind: s.status === 'active' ? 'sample' : s.status };
   }
-  return Object.freeze({ MODEL, validateLaunch, createState, step, circularSpeed, escapeSpeed, energy, angularMomentum, snapshot });
+  return Object.freeze({ MODEL, validateLaunch, createState, step, effectiveMu, acceleration, circularSpeed, escapeSpeed, energy, angularMomentum, snapshot });
 });

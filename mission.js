@@ -10,7 +10,7 @@
   const MIN_ZOOM=1e-7,MAX_ZOOM=2;
   let width=0,height=0,zoom=1.2,view,draft=null,draftVisible=true,invalidCapture=false,preview=[],previewToken=0,previewTimer;
   let cameraOffset={x:0,y:0},lastPointer=null;
-  let mapDrag=null,suppressMapClick=false,mapTool='pick';
+  let mapDrag=null,suppressMapClick=false,mapTool='pick',tracking=false;
   const holeMarker=$('blackHoleMarker'),holeIcon=holeMarker.querySelector('.origin-icon'),holeLabel=holeMarker.querySelector('.origin-label');
   let csrf='',online=false,sessionReady=false,stream=null,streamEpoch=0,connecting=false,identityEpoch=0,selectionEpoch=0,selectedId=null;
   let satellites=new Map(),trails=new Map(),displayStates=new Map(),displayTransitions=new Map(),hiddenLive=false,paused=false,nextCursor=null;
@@ -22,7 +22,7 @@
   const stars=Array.from({length:310},(_,i)=>({x:((Math.sin(i*37.73+4)*43758.5453)%1+1)%1,y:((Math.sin(i*18.35+2)*17838.123)%1+1)%1,r:i%13===0?1.3:.55,a:.18+(i%9)*.06}));
   function message(text){$('notice').textContent=text;}
   function number(id){return $(id).value.trim()===''?NaN:Number($(id).value);}
-  function readInput(){return {name:$('name').value.trim(),position:{x:number('x'),y:number('y')},massKg:number('massKg'),speed:number('speed'),directionDeg:number('directionDeg'),unitSystem:'si-km-v1',calibrationVersion:scale.version,modelVersion:model.MODEL.version};}
+  function readInput(){return {name:$('name').value.trim(),position:{x:number('x'),y:number('y')},massKg:number('massKg'),speed:number('speed'),directionDeg:number('directionDeg'),unitSystem:'si-km-v1',calibrationVersion:scale.version,modelVersion:model.MODEL.version,dynamicsVersion:model.MODEL.dynamics.version};}
   function worldPosition(){return {x:units.fromKm(number('x')),y:units.fromKm(number('y'))};}
   function normalize(input){const result=model.validateLaunch(input);if(result&&result.valid===false)throw new Error(result.error||result.message||'参数无效');return result.normalized||result.value||result;}
   function updateLaunch(){ $('launch').disabled=!draft||!online||!sessionReady||launchBusy; }
@@ -30,17 +30,18 @@
     fields.forEach(id=>{$(id).removeAttribute('aria-invalid');const hint=$(id+'Error');if(hint){hint.hidden=true;hint.textContent='';}});draftVisible=true;draft=null;invalidCapture=false;preview=[];previewToken++;
     const input=readInput(), errors=[];
     const flag=(id,text)=>{$(id).setAttribute('aria-invalid','true');const hint=$(id+'Error');if(hint){hint.textContent=text;hint.hidden=false;}errors.push(text);};
-    if(!input.name||Array.from(input.name).length>64)flag('name','名称须为 1–64 个字符');
+    if(Array.from(input.name).length>64)flag('name','自定义名称最多64个字符，留空可自动命名');
     if(!Number.isFinite(input.position.x))flag('x','请输入有效 X 坐标');
     if(!Number.isFinite(input.position.y))flag('y','请输入有效 Y 坐标');
     const radius=units.fromKm(Math.hypot(input.position.x,input.position.y));
     if(Number.isFinite(radius)&&(radius<model.MODEL.limits.minRadius||radius>model.MODEL.limits.maxRadius)){flag('x',radius<=69.3?'位置在捕获面内，无法发射':`出生半径须在 ${units.formatKm(units.toKm(80))}–${units.formatKm(units.toKm(model.MODEL.limits.maxRadius))} 范围内`);$('y').setAttribute('aria-invalid','true');invalidCapture=radius<=69.3;}
-    if(!Number.isFinite(input.massKg)||input.massKg<=0||input.massKg>1e12)flag('massKg','质量须大于 0 且不超过 10¹² kg');
+    if(!Number.isFinite(input.massKg)||input.massKg<=0||input.massKg>model.MODEL.dynamics.maxMassKg)flag('massKg','质量须大于 0 且不超过 10³⁰ kg');
     if(!Number.isFinite(input.speed)||input.speed<0||input.speed>=units.C_KM_S)flag('speed','初速度须 ≥ 0 且小于光速 299792.458 km/s');
     if(!Number.isFinite(input.directionDeg))flag('directionDeg','请输入有限方向角度');
     if(!errors.length){try{draft=normalize(input);}catch(e){errors.push(e.message);}}
     $('validation').textContent=errors.join('；');
-    $('references').textContent=Number.isFinite(radius)&&radius>69.3?`圆轨道参考 ≈ ${units.toKmS(model.circularSpeed(radius)).toLocaleString('zh-CN',{maximumFractionDigits:2})} km/s · 逃逸参考 ≈ ${units.toKmS(model.escapeSpeed(radius)).toLocaleString('zh-CN',{maximumFractionDigits:2})} km/s${radius<3*model.MODEL.rs?' · 此半径无稳定圆轨道':''}${input.speed>.1*units.C_KM_S?' · 高速区域需相对论修正':''}`:'';
+    $('references').textContent=Number.isFinite(radius)&&radius>69.3?`圆轨道参考 ≈ ${units.toKmS(model.circularSpeed(radius,model.effectiveMu(input.massKg))).toLocaleString('zh-CN',{maximumFractionDigits:2})} km/s · 逃逸参考 ≈ ${units.toKmS(model.escapeSpeed(radius,model.effectiveMu(input.massKg))).toLocaleString('zh-CN',{maximumFractionDigits:2})} km/s${radius<3*model.MODEL.rs?' · 此半径无稳定圆轨道':''}${input.speed>.1*units.C_KM_S?' · 高速区域需相对论修正':''}`:'';
+    $('massEffect').textContent=Number.isFinite(input.massKg)&&input.massKg>0?`质量进入独立双体计算 · m/M = ${(input.massKg/units.centralMassKg).toExponential(2)}。${input.massKg/units.centralMassKg<1e-10?'普通卫星影响极微小；可用科学计数法输入大质量。':'有限质量伪牛顿近似，大质量近视界不等同于真实相对论结果。'}`:'';
     if(pendingLaunch&&!launchBusy){$('launchMessage').textContent='有一次发射结果尚未确认；再次发射将先重试原请求，避免重复创建。';}
     updateLaunch();clearTimeout(previewTimer);
     if(draft&&$('predict').checked&&worker){const token=previewToken,inputSnapshot=readInput();previewTimer=setTimeout(()=>worker.postMessage({token,input:inputSnapshot}),180);}
@@ -48,7 +49,7 @@
   if(worker){worker.onmessage=({data})=>{if(data.token===previewToken){preview=data.points||[];if(data.error)$('launchMessage').textContent='预测暂不可用：'+data.error;}};worker.onerror=()=>{$('launchMessage').textContent='预测工作线程不可用；参数定位与正式发射仍可使用。';};}
   fields.forEach(id=>{const hint=document.createElement('span');hint.id=id+'Error';hint.className='field-error';hint.hidden=true;$(id).after(hint);$(id).setAttribute('aria-describedby',hint.id);});
   fields.forEach(id=>$(id).addEventListener('input',validate));$('predict').addEventListener('change',validate);
-  document.querySelectorAll('[data-preset]').forEach(button=>button.addEventListener('click',()=>{const {x,y}=worldPosition(),r=Math.hypot(x,y);if(!Number.isFinite(r)||r<80||r>model.MODEL.limits.maxRadius)return;const radial=Math.atan2(y,x)*180/Math.PI;const mode=button.dataset.preset;$('speed').value=units.toKmS(mode==='escape'?model.escapeSpeed(r)*1.1:mode==='infall'?model.circularSpeed(r)*.45:model.circularSpeed(r)).toFixed(6);$('directionDeg').value=((radial+(mode==='escape'?20:mode==='infall'?150:90)+360)%360).toFixed(2);validate();}));
+  document.querySelectorAll('[data-preset]').forEach(button=>button.addEventListener('click',()=>{const {x,y}=worldPosition(),r=Math.hypot(x,y);if(!Number.isFinite(r)||r<80||r>model.MODEL.limits.maxRadius)return;const radial=Math.atan2(y,x)*180/Math.PI;const mode=button.dataset.preset;$('speed').value=units.toKmS(mode==='escape'?model.escapeSpeed(r,model.effectiveMu(number('massKg')))*1.1:mode==='infall'?model.circularSpeed(r,model.effectiveMu(number('massKg')))*.45:model.circularSpeed(r,model.effectiveMu(number('massKg')))).toFixed(6);$('directionDeg').value=((radial+(mode==='escape'?20:mode==='infall'?150:90)+360)%360).toFixed(2);validate();}));
   function project(x,y){return OrbitalCamera.toScreen(x,-y,view);}
   function resize(){const bounds=canvas.getBoundingClientRect();width=bounds.width;height=bounds.height;lastPointer=null;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);view=OrbitalCamera.view(width,height,zoom,cameraOffset);}
   new ResizeObserver(resize).observe(canvas);
@@ -62,7 +63,7 @@
   const pointerPosition=e=>{const rect=canvas.getBoundingClientRect();return {x:e.clientX-rect.left,y:e.clientY-rect.top};};
   canvas.addEventListener('mousemove',e=>{lastPointer=pointerPosition(e);});
   function panMap(dx,dy){
-    if(!view)return;$('follow').checked=false;view=OrbitalCamera.pan(view,dx,dy);
+    if(!view)return;setTracking(false);$('follow').checked=false;view=OrbitalCamera.pan(view,dx,dy);
     cameraOffset={x:view.cx-width*.54,y:view.cy-height*.49};
   }
   canvas.addEventListener('pointerdown',e=>{
@@ -96,19 +97,41 @@
     const delta={ArrowLeft:[40,0],ArrowRight:[-40,0],ArrowUp:[0,40],ArrowDown:[0,-40]}[e.key];
     if(delta){e.preventDefault();panMap(delta[0]*(e.shiftKey?2:1),delta[1]*(e.shiftKey?2:1));}
   });
-  $('zoom').addEventListener('input',()=>{$('follow').checked=false;setZoom(MIN_ZOOM*(MAX_ZOOM/MIN_ZOOM)**(number('zoom')/1000),lastPointer||{x:width/2,y:height/2});});
-  canvas.addEventListener('wheel',e=>{if(!e.deltaY)return;e.preventDefault();$('follow').checked=false;lastPointer=pointerPosition(e);const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?height:1);setZoom(zoom*Math.exp(-delta*.001),lastPointer);},{passive:false});
-  canvas.addEventListener('click',e=>{if(suppressMapClick){suppressMapClick=false;return;}if(mapTool!=='pick')return;const rect=canvas.getBoundingClientRect(),p=OrbitalCamera.toWorld(e.clientX-rect.left,e.clientY-rect.top,view);$('x').value=units.toKm(p.x).toFixed(6);$('y').value=units.toKm(-p.y).toFixed(6);validate();});
+  $('zoom').addEventListener('input',()=>{$('follow').checked=false;setZoom(MIN_ZOOM*(MAX_ZOOM/MIN_ZOOM)**(number('zoom')/1000),tracking?{x:width*.5,y:height*.52}:lastPointer||{x:width/2,y:height/2});});
+  canvas.addEventListener('wheel',e=>{if(!e.deltaY)return;e.preventDefault();$('follow').checked=false;lastPointer=pointerPosition(e);const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?height:1);setZoom(zoom*Math.exp(-delta*.001),tracking?{x:width*.5,y:height*.52}:lastPointer);},{passive:false});
+  canvas.addEventListener('click',e=>{if(suppressMapClick){suppressMapClick=false;return;}
+    if(!hiddenLive&&!historyMode){const click=pointerPosition(e);let hit=null,best=Infinity;
+      for(const s of displayStates.values()){
+        if(!['active','escaped'].includes(s.status)||!s.state||Math.hypot(s.state.x,s.state.y)<model.MODEL.rs)continue;
+        const appearance=OrbitalVisuals.satelliteAppearance(view.scale,visualMass(s.massKg));if(appearance.opacity<.05)continue;
+        const p=observedPosition(s.id),q=project(p.x,p.y),distance=Math.hypot(q.x-click.x,q.y-click.y);
+        if(distance<Math.max(6,Math.min(14,appearance.radius*.3))&&distance<best){hit=s.id;best=distance;}
+      }
+      if(hit){selectSatellite(hit);return;}
+    }
+    if(mapTool!=='pick')return;const rect=canvas.getBoundingClientRect(),p=OrbitalCamera.toWorld(e.clientX-rect.left,e.clientY-rect.top,view);$('x').value=units.toKm(p.x).toFixed(6);$('y').value=units.toKm(-p.y).toFixed(6);validate();});
   function fitPosition(p){
     if(!p||![p.x,p.y].every(Number.isFinite)||!width||!height)return zoom;
     const base=OrbitalCamera.view(width,height,1),s=OrbitalCamera.toScreen(p.x,-p.y,base),dx=s.x-base.cx,dy=s.y-base.cy;
     const xRoom=dx>=0?width-100-base.cx:base.cx-35,yRoom=dy>=0?height-100-base.cy:base.cy-170;
     return Math.min(MAX_ZOOM,Math.max(1,xRoom)/Math.max(Math.abs(dx),1),Math.max(1,yRoom)/Math.max(Math.abs(dy),1));
   }
-  $('locate').onclick=()=>setZoom(fitPosition(worldPosition()),null,true);
-  $('fitSelected').onclick=()=>{const s=displayStates.get(selectedId)||satellites.get(selectedId);setZoom(fitPosition(historyMode?replayPoint(replayElapsed):s?.state),null,true);};
-  $('resetView').onclick=()=>{$('follow').checked=false;lastPointer=null;setZoom(1.2,null,true);};
-  holeMarker.onclick=()=>{$('follow').checked=false;setZoom(zoom,null,true);};
+  $('locate').onclick=()=>{setTracking(false);setZoom(fitPosition(worldPosition()),null,true);};
+  $('fitSelected').onclick=()=>{setTracking(false);const s=displayStates.get(selectedId)||satellites.get(selectedId);setZoom(fitPosition(historyMode?replayPoint(replayElapsed):s?.state),null,true);};
+  $('resetView').onclick=()=>{setTracking(false);$('follow').checked=false;lastPointer=null;setZoom(1.2,null,true);};
+  holeMarker.onclick=()=>{setTracking(false);$('follow').checked=false;setZoom(zoom,null,true);};
+  function setTracking(enabled){
+    tracking=Boolean(enabled&&selectedId);if(tracking)$('follow').checked=false;
+    $('trackSelected').textContent=tracking?'退出跟踪':'跟踪卫星';
+    $('trackSelected').setAttribute('aria-pressed',String(tracking));
+  }
+  $('trackSelected').onclick=()=>setTracking(!tracking);
+  $('follow').addEventListener('change',()=>{if($('follow').checked)setTracking(false);});
+  function observedPosition(id){
+    const s=displayStates.get(id)||satellites.get(id);if(!s?.state)return null;
+    const transition=displayTransitions.get(id),fraction=reducedMotion.matches?1:Math.min(1,Math.max(0,(visualTime-(transition?.born??visualTime))/.06));
+    return transition&&s.status==='active'?{...s.state,x:transition.from.x+(s.state.x-transition.from.x)*fraction,y:transition.from.y+(s.state.y-transition.from.y)*fraction}:s.state;
+  }
   function updateHoleMarker(){
     const marker=OrbitalCamera.originMarker(view,width,height);
     holeMarker.style.left=marker.x+'px';holeMarker.style.top=marker.y+'px';
@@ -133,6 +156,10 @@
     if(!view)return;ctx.clearRect(0,0,width,height);ctx.fillStyle='#05070c';ctx.fillRect(0,0,width,height);
     stars.forEach(s=>{ctx.globalAlpha=s.a*(.8+.2*Math.sin(visualTime*.65+s.x*50));ctx.fillStyle='#c6d3ec';ctx.beginPath();ctx.arc(s.x*width,s.y*height,s.r,0,Math.PI*2);ctx.fill();});ctx.globalAlpha=1;
     if($('follow').checked){const s=displayStates.get(selectedId);const point=historyMode?replayPoint(replayElapsed):s?.state;if(point)setZoom(Math.min(zoom,fitPosition(point)),null,true);}
+    if(tracking&&selectedId){const p=historyMode?replayPoint(replayElapsed):observedPosition(selectedId);if(p){
+      view=OrbitalCamera.followAt(view,{x:p.x,y:-p.y},{x:width*.5,y:height*.52});
+      cameraOffset={x:view.cx-width*.54,y:view.cy-height*.49};
+    }}
     updateHoleMarker();
     visuals.blackhole(ctx,width,height,holeView(),visualTime);
     distanceGrid();
@@ -145,8 +172,7 @@
       ctx.save();const radius=model.MODEL.rs*view.scale;
       // Clip in screen coordinates so moving the hole far offscreen cannot hide satellites.
       ctx.beginPath();ctx.rect(0,0,width,height);ctx.moveTo(view.cx+radius*Math.cos(-.48),view.cy+radius*Math.sin(-.48));ctx.ellipse(view.cx,view.cy,radius,radius*.66,-.48,0,Math.PI*2);ctx.clip('evenodd');
-      const transition=displayTransitions.get(id),fraction=reducedMotion.matches?1:Math.min(1,Math.max(0,(visualTime-(transition?.born??visualTime))/.06));
-      const position=transition&&s.status==='active'?{...s.state,x:transition.from.x+(s.state.x-transition.from.x)*fraction,y:transition.from.y+(s.state.y-transition.from.y)*fraction}:s.state;
+      const position=observedPosition(id);
       const tail=trails.get(id)||[];visuals.trail(ctx,position?[...tail.slice(0,-1),position]:tail,project,visualMass(s.massKg),view.scale);
       if(position&&['active','escaped'].includes(s.status))drawSatellite(position,s.name+(s.status==='escaped'?' / 最后位置':''),id===selectedId,s.massKg);ctx.restore();
     }}
@@ -163,7 +189,7 @@
     $('offscreen').hidden=!off;$('coordinateReadout').textContent='WORLD / km · +Y UP';
     const selected=displayStates.get(selectedId)||satellites.get(selectedId),state=historyMode?replayPoint(replayElapsed):selected?.state;
     $('telemetryHud').hidden=!state||hiddenLive;
-    if(state&&!hiddenLive){const t=units.telemetry(state,selected?.calibration||scale);$('telemetryHud').textContent=`${selected?.name||'卫星'} · ${units.formatSpeed(state,selected?.calibration||scale)} · 距中心 ${units.formatKm(t.radiusKm)}`;
+    if(state&&!hiddenLive){const t=units.telemetry(state,selected?.calibration||scale);$('telemetryHud').textContent=`${tracking?'跟踪 / ':''}${selected?.name||'卫星'} · ${units.formatSpeed(state,selected?.calibration||scale)} · 距中心 ${units.formatKm(t.radiusKm)}`;
       const q=project(state.x,state.y);if(q.x<15||q.x>width-15||q.y<140||q.y>height-110){const x=Math.max(18,Math.min(width-18,q.x)),y=Math.max(150,Math.min(height-165,q.y));ctx.save();ctx.translate(x,y);ctx.rotate(Math.atan2(q.y-y,q.x-x));ctx.fillStyle='#a4dba6';ctx.beginPath();ctx.moveTo(7,0);ctx.lineTo(-5,-5);ctx.lineTo(-5,5);ctx.closePath();ctx.fill();ctx.restore();}}
   }
   function drawSatellite(state,name,selected,massKg=1000){
@@ -187,8 +213,8 @@
   function saveText(text,name,type='text/plain'){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   $('copyKey').onclick=async()=>{try{await navigator.clipboard.writeText(recoveryKey);message('恢复密钥已复制，请保存在安全位置。');}catch{message('无法访问剪贴板，请使用下载密钥。');}};
   $('downloadKey').onclick=()=>saveText('ORBITAL 恢复密钥\n'+recoveryKey+'\n请私密保存。持有密钥可访问和控制此档案的卫星。','orbital-recovery-key.txt');$('dismissKey').onclick=()=>revealKey('');
-  function resetIdentity(){currentUserId=null;impactWaves=[];seenCaptures.clear();lastServerTick=-1;paused=false;hiddenLive=false;$('pause').textContent='暂停观察';$('viewMode').textContent='实时观察';identityEpoch++;selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);stream?.close();stream=null;satellites.clear();trails.clear();displayStates.clear();displayTransitions.clear();selectedId=null;historyPoints=[];historyMode=false;playing=false;pendingLaunch=null;nextCursor=null;sessionReady=false;csrf='';revealKey('');$('detail').hidden=true;$('loadMore').hidden=true;$('replay').hidden=true;renderList();}
-  async function connect(){if(connecting||identityBusy)return;connecting=true;identityLock(true);let epoch=identityEpoch;online=false;updateLaunch();$('connection').textContent='正在连接计算服务…';try{const session=await api('/api/session/guest',{method:'POST'});if(epoch!==identityEpoch)return;if(currentUserId&&currentUserId!==session.user.id){resetIdentity();epoch=identityEpoch;}currentUserId=session.user.id;csrf=session.csrfToken;sessionReady=true;$('identityLabel').textContent='档案 '+session.user.id;if(session.recoveryKey)revealKey(session.recoveryKey);const config=await api('/api/model');if(epoch!==identityEpoch)return;if((config.model.version||config.model.modelVersion)!==model.MODEL.version||config.model.calibration?.version!==scale.version)throw new Error('浏览器模型或物理标定与服务器版本不一致，请刷新页面。');$('modelVersion').textContent=config.model.version||config.model.modelVersion||'pw-2d-v1';serverStatus(config.server);await loadList(false);if(epoch!==identityEpoch)return;openStream();}catch(e){online=false;$('connection').textContent='服务离线';message(e.message+' 请启动项目的 Node 服务后点击“重新连接”。');}finally{connecting=false;identityLock(false);updateLaunch();}}
+  function resetIdentity(){setTracking(false);currentUserId=null;impactWaves=[];seenCaptures.clear();lastServerTick=-1;paused=false;hiddenLive=false;$('pause').textContent='暂停观察';$('viewMode').textContent='实时观察';identityEpoch++;selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);stream?.close();stream=null;satellites.clear();trails.clear();displayStates.clear();displayTransitions.clear();selectedId=null;historyPoints=[];historyMode=false;playing=false;pendingLaunch=null;nextCursor=null;sessionReady=false;csrf='';revealKey('');$('detail').hidden=true;$('loadMore').hidden=true;$('replay').hidden=true;renderList();}
+  async function connect(){if(connecting||identityBusy)return;connecting=true;identityLock(true);let epoch=identityEpoch;online=false;updateLaunch();$('connection').textContent='正在连接计算服务…';try{const session=await api('/api/session/guest',{method:'POST'});if(epoch!==identityEpoch)return;if(currentUserId&&currentUserId!==session.user.id){resetIdentity();epoch=identityEpoch;}currentUserId=session.user.id;csrf=session.csrfToken;sessionReady=true;$('identityLabel').textContent='档案 '+session.user.id;if(session.recoveryKey)revealKey(session.recoveryKey);const config=await api('/api/model');if(epoch!==identityEpoch)return;if((config.model.version||config.model.modelVersion)!==model.MODEL.version||config.model.calibration?.version!==scale.version||config.model.dynamics?.version!==model.MODEL.dynamics.version)throw new Error('浏览器模型或物理标定与服务器版本不一致，请刷新页面。');$('modelVersion').textContent=model.MODEL.dynamics.version;serverStatus(config.server);await loadList(false);if(epoch!==identityEpoch)return;openStream();}catch(e){online=false;$('connection').textContent='服务离线';message(e.message+' 请启动项目的 Node 服务后点击“重新连接”。');}finally{connecting=false;identityLock(false);updateLaunch();}}
   function openStream(){stream?.close();stream=new EventSource('/api/stream'+(selectedId?'?satelliteId='+encodeURIComponent(selectedId):''));const epoch=identityEpoch,subscription=++streamEpoch;stream.addEventListener('snapshot',event=>{if(epoch!==identityEpoch||subscription!==streamEpoch)return;try{const data=JSON.parse(event.data);if(serverStatus(data.server)===false)return;ingest(data.satellites||[]); }catch{message('实时快照无效，请重新连接。');}});stream.onerror=()=>{if(epoch!==identityEpoch||subscription!==streamEpoch)return;online=false;$('connection').textContent='实时连接中断 · 自动重连中';updateLaunch();};}
   function ingest(items){for(const s of items){const old=satellites.get(s.id),incomingTick=s.state?.tick??-1,oldTick=old?.state?.tick??-1;if(old&&(incomingTick<oldTick||(incomingTick===oldTick&&!['active','queued'].includes(old.status)&&['active','queued'].includes(s.status))))continue;if(s.status==='captured'&&old&&old.status==='active'&&!paused&&!historyMode)captureVisual(s);
       satellites.set(s.id,s);if(!paused){const shown=displayStates.get(s.id);if(shown?.state&&s.state&&shown.state.tick!==s.state.tick)displayTransitions.set(s.id,{from:shown.state,born:visualTime});displayStates.set(s.id,s);if(s.state){const trail=trails.get(s.id)||[],last=trail[trail.length-1];if(!last||last.tick!==s.state.tick)trail.push({x:s.state.x,y:s.state.y,tick:s.state.tick});if(trail.length>120)trail.shift();trails.set(s.id,trail);}}}while(displayStates.size>100){const oldest=Array.from(displayStates.keys()).find(id=>id!==selectedId);displayStates.delete(oldest);trails.delete(oldest);displayTransitions.delete(oldest);}renderList();renderDetail();}
@@ -204,12 +230,12 @@
       const text=`${statusText[s.status]||s.status} · ${(s.state?.elapsedSeconds||0).toFixed(2)} 模拟秒 · ${['active','queued'].includes(s.status)?'当前':'末态'}速度 ${units.formatSpeed(s.state,s.calibration||scale)}`;if(node.meta.textContent!==text)node.meta.textContent=text;
     }
   }
-  function renderDetail(){const s=satellites.get(selectedId);$('fitSelected').disabled=!s;if(!s)return;$('detail').hidden=false;$('detailName').textContent=s.name;
+  function renderDetail(){const s=satellites.get(selectedId);$('fitSelected').disabled=!s;$('trackSelected').disabled=!s;if(!s)return;$('detail').hidden=false;$('detailName').textContent=s.name;
     const t=s.telemetry||units.telemetry(s.state,s.calibration||scale);
-    $('detailMeta').textContent=`${s.id} · ${statusText[s.status]||s.status} · ${(s.state?.elapsedSeconds||0).toFixed(3)} 模拟秒 · 对应 ${t.physicalElapsedSeconds.toPrecision(4)} s 模型物理时间 · ${s.massKg} kg`;
+    $('detailMeta').textContent=`${s.id} · ${statusText[s.status]||s.status} · ${(s.state?.elapsedSeconds||0).toFixed(3)} 模拟秒 · 对应 ${t.physicalElapsedSeconds.toPrecision(4)} s 模型物理时间 · ${s.massKg} kg · ${s.initial.dynamicsVersion?'独立双体质量计算':'历史测试粒子模型'}`;
     $('detailSpeed').textContent=`初速度 ${units.toKmS(s.initial.speed,s.calibration||scale).toLocaleString('zh-CN',{maximumFractionDigits:2})} km/s · ${s.status==='active'?'当前':'末态'}速度 ${units.formatSpeed(s.state,s.calibration||scale)}${t.physicalSpeedValid?` · vx ≈ ${t.vxKmS.toFixed(2)}，vy ≈ ${t.vyKmS.toFixed(2)} km/s · ${(t.fractionOfC*100).toFixed(2)}% c`:` · 模型给出 ${t.speedKmS.toFixed(2)} km/s，不能作为真实速度`}${s.calibrationInferred?' · 历史场景记录按示例质量换算':''}`;
     $('terminate').disabled=!['active','queued'].includes(s.status)||!online;}
-  async function selectSatellite(id){selectedId=id;selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);historyPoints=[];historyMode=false;playing=false;impactWaves=[];replayCaptureShown=false;$('replay').hidden=true;$('downloadExport').hidden=true;$('historyMessage').textContent='';$('viewMode').textContent='实时观察';hiddenLive=false;if(online&&sessionReady)openStream();renderList();renderDetail();const epoch=selectionEpoch;try{const data=await api('/api/satellites/'+encodeURIComponent(id));if(epoch===selectionEpoch)ingest([data.satellite]);}catch(e){if(epoch===selectionEpoch)message(e.message);}}
+  async function selectSatellite(id){selectedId=id;setTracking(true);selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);historyPoints=[];historyMode=false;playing=false;impactWaves=[];replayCaptureShown=false;$('replay').hidden=true;$('downloadExport').hidden=true;$('historyMessage').textContent='';$('viewMode').textContent=paused?'观察已暂停 · 服务继续运行':'实时观察';hiddenLive=false;if(online&&sessionReady)openStream();renderList();renderDetail();const epoch=selectionEpoch;try{const data=await api('/api/satellites/'+encodeURIComponent(id));if(epoch===selectionEpoch)ingest([data.satellite]);}catch(e){if(epoch===selectionEpoch)message(e.message);}}
   $('launchForm').onsubmit=async e=>{e.preventDefault();if(launchBusy||!draft||!online||!sessionReady)return;const epoch=identityEpoch;launchBusy=true;if(!pendingLaunch)pendingLaunch={...readInput(),idempotencyKey:crypto.randomUUID()};updateLaunch();$('launchMessage').textContent='正在提交并保存出生档案…';try{const data=await api('/api/satellites',{method:'POST',body:JSON.stringify(pendingLaunch)});if(epoch!==identityEpoch)return;pendingLaunch=null;draftVisible=false;preview=[];previewToken++;ingest([data.satellite]);selectSatellite(data.satellite.id);$('launchMessage').textContent='发射已确认 · '+data.satellite.id;hiddenLive=false;}catch(error){if(epoch!==identityEpoch)return;if(error.status&&error.status<500&&error.status!==408&&error.status!==429)pendingLaunch=null;$('launchMessage').textContent=error.message+(pendingLaunch?' · 结果尚未确认，再次点击将安全重试同一发射。':'');}finally{launchBusy=false;updateLaunch();}};
   $('reconnect').onclick=connect;$('refresh').onclick=()=>loadList(false);$('loadMore').onclick=()=>loadList(true);
   $('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'继续观察':'暂停观察';$('viewMode').textContent=paused?'观察已暂停 · 服务继续运行':'实时观察';if(!paused){for(const s of satellites.values()){const shown=displayStates.get(s.id);if(s.status==='captured'&&shown?.status==='active')captureVisual(s);}displayStates.clear();displayTransitions.clear();for(const s of Array.from(satellites.values()).slice(-100))displayStates.set(s.id,s);}};$('clear').onclick=()=>{hiddenLive=true;historyMode=false;playing=false;$('viewMode').textContent='卫星已隐藏';message('已隐藏观察对象；没有停止计算或删除档案。');};$('showAll').onclick=()=>{hiddenLive=false;historyMode=false;$('viewMode').textContent=paused?'观察已暂停':'实时观察';};
@@ -223,7 +249,7 @@
   document.querySelectorAll('[data-export]').forEach(button=>button.onclick=async()=>{const id=selectedId,epoch=++exportEpoch;if(!id)return;$('downloadExport').hidden=true;$('historyMessage').textContent='正在创建导出任务…';try{const data=await api('/api/satellites/'+encodeURIComponent(id)+'/exports',{method:'POST',body:JSON.stringify({format:button.dataset.export})});if(epoch!==exportEpoch)return;pollExport(data.export,epoch);}catch(e){if(epoch===exportEpoch)$('historyMessage').textContent=e.message;}});
   async function pollExport(job,epoch){if(epoch!==exportEpoch)return;if(job.status==='ready'||job.status==='completed'){const link=$('downloadExport');link.href=job.downloadUrl||'/api/exports/'+encodeURIComponent(job.id)+'/download';link.textContent='下载 '+(job.format||'')+' 文件';link.hidden=false;$('historyMessage').textContent='完整记录导出已就绪 · 截止 tick '+job.cutoffTick;return;}if(job.status==='error'||job.status==='failed'){$('historyMessage').textContent='导出失败：'+(job.message||job.error||job.errorMessage||'请重试');return;}$('historyMessage').textContent='服务器正在生成完整记录导出…';exportTimer=setTimeout(async()=>{try{const data=await api('/api/exports/'+encodeURIComponent(job.id));pollExport(data.export,epoch);}catch(e){if(epoch===exportEpoch)$('historyMessage').textContent=e.message;}},1500);}
   $('physicalScale').textContent=`黑洞质量：10 M☉ · 视界半径 r_s = ${units.formatKm(scale.schwarzschildRadiusKm)}。1 现实秒推进约 ${scale.secondsPerUnit.toPrecision(5)} s 模型物理时间，相当于慢放约 ${(1/scale.secondsPerUnit).toFixed(0)} 倍。`;
-  $('launchLimits').textContent=`出生半径 ${units.formatKm(units.toKm(80))}–${units.formatKm(units.toKm(model.MODEL.limits.maxRadius))}；初速度小于 299792.458 km/s`;
+  $('launchLimits').textContent=`当前模拟允许出生半径 ${units.formatKm(units.toKm(80))}–${units.formatKm(units.toKm(model.MODEL.limits.maxRadius))}；初速度小于 299792.458 km/s`;
   setZoom(zoom);validate();connect();
 })();
 

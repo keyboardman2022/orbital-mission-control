@@ -5,6 +5,7 @@
  'use strict';
  // IAU 2015 B3 nominal GM_sun; SI speed of light is exact.
  const C_KM_S=299792.458,gmM3S2=10*1.3271244e20;
+ const G_M3_KG_S2=6.67430e-11,centralMassKg=gmM3S2/G_M3_KG_S2;
  const schwarzschildRadiusKm=2*gmM3S2/(C_KM_S*1000)**2/1000;
  const kmPerUnit=schwarzschildRadiusKm/66;
  const secondsPerUnit=Math.sqrt(2000000*(kmPerUnit*1000)**3/gmM3S2);
@@ -25,5 +26,5 @@
  function niceDistance(target){const power=10**Math.floor(Math.log10(Math.max(target,1e-20)));const n=target/power;return (n>=5?5:n>=2?2:1)*power;}
  function formatKm(km){const a=Math.abs(km);if(a>=1e9)return (km/1e9).toPrecision(3)+' 十亿 km';if(a>=1e6)return (km/1e6).toPrecision(3)+' 百万 km';return km.toLocaleString('zh-CN',{maximumFractionDigits:a<1?4:2})+' km';}
  function formatSpeed(state,s=SCALE){const t=telemetry(state,s);return t.physicalSpeedValid?'≈ '+t.speedKmS.toLocaleString('zh-CN',{maximumFractionDigits:2})+' km/s':'超出物理适用范围';}
- return Object.freeze({C_KM_S,SCALE,toKm,fromKm,toKmS,fromKmS,telemetry,niceDistance,formatKm,formatSpeed});
+ return Object.freeze({C_KM_S,G_M3_KG_S2,centralMassKg,SCALE,toKm,fromKm,toKmS,fromKmS,telemetry,niceDistance,formatKm,formatSpeed});
 });

@@ -86,8 +86,9 @@ class Engine{
     if(this.records.size>=this.maxActive)fail(503,'当前并发计算容量已满，请稍后发射；已有卫星继续运行');
     // A newborn must never be durable ahead of its world's durable checkpoint.
     this.checkpoint();
-    const id=randomUUID(),queued=this.targetTick()-this.tick>120;
-    const r={id,ownerId:userId,name:initial.name,massKg:initial.massKg,initial,status:queued?'queued':'active',birthTick:queued?null:this.tick,state:M.createState(initial,{continuousTracking:true}),createdAt:new Date(this.now()).toISOString(),endReason:null,seq:0,eventSeq:0,lastSample:null};
+    const id=randomUUID(),queued=this.targetTick()-this.tick>120,createdMs=Math.floor(this.now()),nameGenerated=!initial.name;
+    if(nameGenerated)initial.name='SAT-'+hash(`${createdMs}:${id}`).slice(0,16);
+    const r={id,ownerId:userId,name:initial.name,massKg:initial.massKg,initial,...(nameGenerated?{nameGenerated:true,nameTimestampMs:createdMs}:{}),status:queued?'queued':'active',birthTick:queued?null:this.tick,state:M.createState(initial,{continuousTracking:true}),createdAt:new Date(createdMs).toISOString(),endReason:null,seq:0,eventSeq:0,lastSample:null};
     if(queued)r.state.status='queued';
     this.transaction(()=>{
       if(!queued){r.lastSample={...M.snapshot(r.state),kind:'birth',seq:++r.seq};r.eventSeq=1;}
