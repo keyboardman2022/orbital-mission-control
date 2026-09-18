@@ -53,6 +53,18 @@
   }
   function effectiveMu(massKg) {return MODEL.mu*(1+massKg/units.centralMassKg);}
   function circularSpeed(r,mu=MODEL.mu) { return Math.sqrt(mu * r) / (r - MODEL.rs); }
+  // Period is in simulation seconds (normal live playback uses one per wall second).
+  // Solve on the stable circular-orbit branch; this is an observation criterion,
+  // never a boundary of the gravitational field.
+  function circularRadiusForPeriod(period,mu=MODEL.mu) {
+    const stableRadius=3*MODEL.rs;
+    const orbitPeriod=r=>2*Math.PI*r/circularSpeed(r,mu);
+    if(!Number.isFinite(period)||!Number.isFinite(mu)||mu<=0||period<orbitPeriod(stableRadius))throw new RangeError('Period must admit a stable circular orbit');
+    let low=stableRadius,high=stableRadius;
+    while(orbitPeriod(high)<period)high*=2;
+    for(let i=0;i<80;i++){const middle=(low+high)/2;if(orbitPeriod(middle)<period)low=middle;else high=middle;}
+    return (low+high)/2;
+  }
   function escapeSpeed(r,mu=MODEL.mu) { return Math.sqrt(2 * mu / (r - MODEL.rs)); }
   function energy(s) { return (s.vx * s.vx + s.vy * s.vy) / 2 - (s.gravitationalMu??MODEL.mu) / (Math.hypot(s.x, s.y) - MODEL.rs); }
   function angularMomentum(s) { return s.x * s.vy - s.y * s.vx; }
@@ -112,5 +124,5 @@
     return { tick: s.tick, elapsedSeconds: s.elapsedSeconds, x: s.x, y: s.y, vx: s.vx, vy: s.vy,
       kind: s.status === 'active' ? 'sample' : s.status };
   }
-  return Object.freeze({ MODEL, validateLaunch, createState, step, effectiveMu, acceleration, circularSpeed, escapeSpeed, energy, angularMomentum, snapshot });
+  return Object.freeze({ MODEL, validateLaunch, createState, step, effectiveMu, acceleration, circularSpeed, circularRadiusForPeriod, escapeSpeed, energy, angularMomentum, snapshot });
 });

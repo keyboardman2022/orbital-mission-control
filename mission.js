@@ -9,7 +9,8 @@
   let mapWave=null,sweepBusy=false,sweepSending=false,sweepLastSend=-1,sweepEpoch=0;
   const sweptIds=new Set(),sweepPending=new Set();
   const visualMass=mass=>Math.max(1,Math.min(3,1+Math.log10(Math.max(1,mass)/1000+1)*.6));
-  const MIN_ZOOM=1e-7,MAX_ZOOM=2;
+  const OBSERVATION_PERIOD=600,OBSERVATION_RADIUS=model.circularRadiusForPeriod(OBSERVATION_PERIOD),MAX_ZOOM=2;
+  let minZoom=.1;
   let width=0,height=0,zoom=1.2,view,draft=null,draftVisible=true,invalidCapture=false,preview=[],previewToken=0,previewTimer;
   let cameraOffset={x:0,y:0},lastPointer=null;
   let mapDrag=null,suppressMapClick=false,mapTool='pick',tracking=false;
@@ -55,14 +56,14 @@
   fields.forEach(id=>$(id).addEventListener('input',validate));$('predict').addEventListener('change',validate);
   document.querySelectorAll('[data-preset]').forEach(button=>button.addEventListener('click',()=>{const {x,y}=worldPosition(),r=Math.hypot(x,y);if(!Number.isFinite(r)||r<80||r>model.MODEL.limits.maxRadius)return;const radial=Math.atan2(y,x)*180/Math.PI;const mode=button.dataset.preset;$('speed').value=units.toKmS(mode==='escape'?model.escapeSpeed(r,model.effectiveMu(number('massKg')))*1.1:mode==='infall'?model.circularSpeed(r,model.effectiveMu(number('massKg')))*.45:model.circularSpeed(r,model.effectiveMu(number('massKg')))).toFixed(6);$('directionDeg').value=((radial+(mode==='escape'?20:mode==='infall'?150:90)+360)%360).toFixed(2);validate();}));
   function project(x,y){return OrbitalCamera.toScreen(x,-y,view);}
-  function resize(){const bounds=canvas.getBoundingClientRect();width=bounds.width;height=bounds.height;lastPointer=null;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);view=OrbitalCamera.view(width,height,zoom,cameraOffset);}
+  function resize(){const bounds=canvas.getBoundingClientRect();width=bounds.width;height=bounds.height;lastPointer=null;if(width<=0||height<=0)return;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);minZoom=Math.min(MAX_ZOOM,OrbitalCamera.minimumZoom(width,height,OBSERVATION_RADIUS));setZoom(zoom);}
   new ResizeObserver(resize).observe(canvas);
   function setZoom(value,anchor=null,recenter=false){
-    zoom=Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,value));if(recenter)cameraOffset={x:0,y:0};
+    zoom=Math.max(minZoom,Math.min(MAX_ZOOM,value));if(recenter)cameraOffset={x:0,y:0};
     const next=OrbitalCamera.view(width,height,zoom,cameraOffset);
     view=anchor&&view?.scale>0?OrbitalCamera.zoomAt(view,next.scale,anchor):next;
     cameraOffset={x:view.cx-width*.54,y:view.cy-height*.49};
-    $('zoom').value=Math.round(Math.log(zoom/MIN_ZOOM)/Math.log(MAX_ZOOM/MIN_ZOOM)*1000);$('zoomValue').textContent=Number((zoom*100).toPrecision(3))+'%';
+    $('zoom').value= minZoom===MAX_ZOOM?1000:Math.round(Math.log(zoom/minZoom)/Math.log(MAX_ZOOM/minZoom)*1000);$('zoomValue').textContent=Number((zoom*100).toPrecision(3))+'%';
   }
   const pointerPosition=e=>{const rect=canvas.getBoundingClientRect();return {x:e.clientX-rect.left,y:e.clientY-rect.top};};
   canvas.addEventListener('mousemove',e=>{lastPointer=pointerPosition(e);});
@@ -101,7 +102,7 @@
     const delta={ArrowLeft:[40,0],ArrowRight:[-40,0],ArrowUp:[0,40],ArrowDown:[0,-40]}[e.key];
     if(delta){e.preventDefault();panMap(delta[0]*(e.shiftKey?2:1),delta[1]*(e.shiftKey?2:1));}
   });
-  $('zoom').addEventListener('input',()=>{$('follow').checked=false;setZoom(MIN_ZOOM*(MAX_ZOOM/MIN_ZOOM)**(number('zoom')/1000),tracking?{x:width*.5,y:height*.52}:lastPointer||{x:width/2,y:height/2});});
+  $('zoom').addEventListener('input',()=>{$('follow').checked=false;setZoom(minZoom*(MAX_ZOOM/minZoom)**(number('zoom')/1000),tracking?{x:width*.5,y:height*.52}:lastPointer||{x:width/2,y:height/2});});
   canvas.addEventListener('wheel',e=>{if(!e.deltaY)return;e.preventDefault();$('follow').checked=false;lastPointer=pointerPosition(e);const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?height:1);setZoom(zoom*Math.exp(-delta*.001),tracking?{x:width*.5,y:height*.52}:lastPointer);},{passive:false});
   canvas.addEventListener('click',e=>{if(suppressMapClick){suppressMapClick=false;return;}
     if(!hiddenLive&&!historyMode){const click=pointerPosition(e);let hit=null,best=Infinity;
@@ -120,8 +121,15 @@
     const xRoom=dx>=0?width-100-base.cx:base.cx-35,yRoom=dy>=0?height-100-base.cy:base.cy-170;
     return Math.min(MAX_ZOOM,Math.max(1,xRoom)/Math.max(Math.abs(dx),1),Math.max(1,yRoom)/Math.max(Math.abs(dy),1));
   }
-  $('locate').onclick=()=>{setTracking(false);setZoom(fitPosition(worldPosition()),null,true);};
-  $('fitSelected').onclick=()=>{setTracking(false);const s=displayStates.get(selectedId)||satellites.get(selectedId);setZoom(fitPosition(historyMode?replayPoint(replayElapsed):s?.state),null,true);};
+  function locatePosition(point){
+    const requested=fitPosition(point);setZoom(requested,null,true);
+    if(requested<minZoom&&point&&[point.x,point.y].every(Number.isFinite)){
+      view=OrbitalCamera.followAt(view,{x:point.x,y:-point.y},{x:width*.5,y:height*.52});
+      cameraOffset={x:view.cx-width*.54,y:view.cy-height*.49};
+    }
+  }
+  $('locate').onclick=()=>{setTracking(false);locatePosition(worldPosition());};
+  $('fitSelected').onclick=()=>{setTracking(false);const s=displayStates.get(selectedId)||satellites.get(selectedId);locatePosition(historyMode?replayPoint(replayElapsed):s?.state);};
   $('resetView').onclick=()=>{setTracking(false);$('follow').checked=false;lastPointer=null;setZoom(1.2,null,true);};
   holeMarker.onclick=()=>{setTracking(false);$('follow').checked=false;setZoom(zoom,null,true);};
   function setTracking(enabled){
@@ -354,7 +362,8 @@
   $('live').onclick=()=>{clearHistory();selectionEpoch++;historyMode=false;playing=false;hiddenLive=false;$('replay').hidden=true;$('viewMode').textContent=paused?'观察已暂停':'实时观察';};
   document.querySelectorAll('[data-export]').forEach(button=>button.onclick=async()=>{const id=selectedId,epoch=++exportEpoch;if(!id)return;$('downloadExport').hidden=true;$('historyMessage').textContent='正在创建导出任务…';try{const data=await api('/api/satellites/'+encodeURIComponent(id)+'/exports',{method:'POST',body:JSON.stringify({format:button.dataset.export})});if(epoch!==exportEpoch)return;pollExport(data.export,epoch);}catch(e){if(epoch===exportEpoch)$('historyMessage').textContent=e.message;}});
   async function pollExport(job,epoch){if(epoch!==exportEpoch)return;if(job.status==='ready'||job.status==='completed'){const link=$('downloadExport');link.href=job.downloadUrl||'/api/exports/'+encodeURIComponent(job.id)+'/download';link.textContent='下载 '+(job.format||'')+' 文件';link.hidden=false;$('historyMessage').textContent='完整记录导出已就绪 · 截止 tick '+job.cutoffTick;return;}if(job.status==='error'||job.status==='failed'){$('historyMessage').textContent='导出失败：'+(job.message||job.error||job.errorMessage||'请重试');return;}$('historyMessage').textContent='服务器正在生成完整记录导出…';exportTimer=setTimeout(async()=>{try{const data=await api('/api/exports/'+encodeURIComponent(job.id));pollExport(data.export,epoch);}catch(e){if(epoch===exportEpoch)$('historyMessage').textContent=e.message;}},1500);}
-  $('physicalScale').textContent=`黑洞质量：10 M☉ · 视界半径 r_s = ${units.formatKm(scale.schwarzschildRadiusKm)}。1 现实秒推进约 ${scale.secondsPerUnit.toPrecision(5)} s 模型物理时间，相当于慢放约 ${(1/scale.secondsPerUnit).toFixed(0)} 倍。`;
+  $('physicalScale').textContent=`黑洞质量：${scale.centralMassSolar} M☉ ≈ ${units.centralMassKg.toExponential(4)} kg · 视界半径 r_s = ${units.formatKm(scale.schwarzschildRadiusKm)}。1 现实秒推进约 ${scale.secondsPerUnit.toPrecision(5)} s 模型物理时间，相当于慢放约 ${(1/scale.secondsPerUnit).toFixed(0)} 倍。`;
+  $('observationRange').textContent=`最远视野：黑洞居中时距中心约 ${units.formatKm(units.toKm(OBSERVATION_RADIUS))}。依据当前慢放倍率下普通卫星圆轨道一周约 ${OBSERVATION_PERIOD/60} 分钟；这是观察尺度，不是引力边界。拖拽或跟踪可观察其他位置。`;
   $('launchLimits').textContent=`当前模拟允许出生半径 ${units.formatKm(units.toKm(80))}–${units.formatKm(units.toKm(model.MODEL.limits.maxRadius))}；初速度小于 299792.458 km/s`;
   setZoom(zoom);validate();connect();
 })();

@@ -77,7 +77,7 @@ test('paged loader fails a nonadvancing cursor instead of looping forever',async
 async function missionHarness(status='terminated'){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js');
   const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],sweepRequests=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
-  function node(id){if(nodes.has(id))return nodes.get(id);let value='';const result={id,children:[],style:{},dataset:{},checked:false,hidden:false,disabled:false,textContent:'',get value(){return value;},set value(v){value=String(v);},setAttribute(){},removeAttribute(){},addEventListener(){},after(){},remove(){},append(...items){this.children.push(...items);},querySelector(selector){return node(id+selector);},getContext(){return context2d;},getBoundingClientRect(){return {width:1000,height:800,left:0,top:0};},classList:{toggle(){},add(){},remove(){}}};nodes.set(id,result);return result;}
+  function node(id){if(nodes.has(id))return nodes.get(id);let value='';const handlers={};const result={id,children:[],style:{},dataset:{},checked:false,hidden:false,disabled:false,textContent:'',get value(){return value;},set value(v){value=String(v);},setAttribute(){},removeAttribute(){},addEventListener(type,fn){handlers[type]=fn;},dispatch(type,event={}){handlers[type]?.(event);},after(){},remove(){},append(...items){this.children.push(...items);},querySelector(selector){return node(id+selector);},getContext(){return context2d;},getBoundingClientRect(){return {width:1000,height:800,left:0,top:0};},classList:{toggle(){},add(){},remove(){}}};nodes.set(id,result);return result;}
   for(const [id,value]of Object.entries({name:'',x:units.toKm(500),y:0,massKg:1000,speed:0,directionDeg:0,rate:1}))node(id).value=value;
   const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1}};
   const reply=data=>({ok:true,json:async()=>data});
@@ -97,6 +97,22 @@ async function missionHarness(status='terminated'){
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
+
+test('mission clamps extreme zoom requests to the observable scale and keeps distant satellites locatable',async()=>{
+ const h=await missionHarness(),U=require('../shared/units.js');
+ h.node('resetView').onclick();h.node('zoom').value=0;h.node('zoom').dispatch('input');h.node('blackHoleMarker').onclick();
+ const canvas=h.node('universe');
+ for(let i=0;i<3;i++)canvas.dispatch('wheel',{deltaY:1e6,deltaMode:0,clientX:500,clientY:400,preventDefault(){}});
+ h.node('blackHoleMarker').onclick();canvas.dispatch('click',{clientX:0,clientY:0});
+ assert.ok(Math.hypot(Number(h.node('x').value),Number(h.node('y').value))<=1197.595);
+ assert.match(h.node('physicalScale').textContent,/1\.9884e\+31 kg/);
+ assert.match(h.node('observationRange').textContent,/不是引力边界/);
+ h.node('x').value=1e6;h.node('y').value=0;h.node('locate').onclick();
+ canvas.dispatch('click',{clientX:500,clientY:416});
+ assert.ok(Math.abs(Number(h.node('x').value)-1e6)<1e-5);
+ assert.ok(Math.abs(Number(h.node('y').value))<1e-5);
+ assert.equal(h.satellite.state.x,500);
+});
 
 test('mission rapid seeks abort older windows and ignore their late responses',async()=>{
   const h=await missionHarness(),initial=h.node('history').onclick();

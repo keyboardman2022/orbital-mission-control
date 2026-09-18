@@ -3,6 +3,27 @@ const assert=require('node:assert/strict');
 const Camera=require('./camera.js');
 const P=require('./physics.js');
 
+test('observation radius matches a ten-minute PW orbit without imposing a gravity cutoff',()=>{
+ const M=require('./shared/simulation.js'),U=require('./shared/units.js');
+ const radius=M.circularRadiusForPeriod(600);
+ assert.ok(Math.abs(2*Math.PI*radius/M.circularSpeed(radius)-600)<1e-8);
+ assert.ok(Math.abs(U.toKm(radius)-1197.5945374)<1e-6);
+ assert.ok(M.acceleration(radius*100,0).x<0);
+ assert.throws(()=>M.circularRadiusForPeriod(0),/period/i);
+});
+
+test('maximum centered view fits the observation radius across viewport sizes',()=>{
+ const radius=2676.4153875121247;
+ for(const [w,h]of [[1100,700],[375,520],[1400,500]]){
+  const zoom=Camera.minimumZoom(w,h,radius),view=Camera.view(w,h,zoom);
+  const distances=[[0,0],[w,0],[0,h],[w,h]].map(([x,y])=>{const p=Camera.toWorld(x,y,view);return Math.hypot(p.x,p.y);});
+  assert.ok(Math.abs(Math.max(...distances)-radius)<1e-8);
+  const pointer={x:w*.3,y:h*.6},point=Camera.toWorld(pointer.x,pointer.y,view);
+  const enlarged=Camera.zoomAt(view,view.scale*2,pointer),screen=Camera.toScreen(point.x,point.y,enlarged);
+  assert.ok(Math.hypot(screen.x-pointer.x,screen.y-pointer.y)<1e-8);
+ }
+});
+
 test('projected positions round-trip at desktop/mobile sizes and every zoom limit',()=>{
   for(const [w,h] of [[1100,700],[500,500]])for(const zoom of [.1,.5,1,2]){
     const view=Camera.view(w,h,zoom);

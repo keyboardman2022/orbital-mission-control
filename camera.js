@@ -11,6 +11,12 @@ const OrbitalCamera=(()=>{
     return {...view,cx:anchor.x+(view.cx-anchor.x)*ratio,
       cy:anchor.y+(view.cy-anchor.y)*ratio,size:view.size*ratio,scale:nextScale};
   }
+  function minimumZoom(width,height,radius){
+    const base=view(width,height);
+    return Math.max(...[[0,0],[width,0],[0,height],[width,height]].map(([x,y])=>{
+      const point=toWorld(x,y,base);return Math.hypot(point.x,point.y)/radius;
+    }));
+  }
   function pan(view,dx,dy){return {...view,cx:view.cx+dx,cy:view.cy+dy};}
   function followAt(view,point,target){const p=toScreen(point.x,point.y,view);return pan(view,target.x-p.x,target.y-p.y);}
   function originMarker(view,width,height){
@@ -24,6 +30,6 @@ const OrbitalCamera=(()=>{
   function toScreen(x,y,view){
     return {x:view.cx+view.scale*(x*cos-y*tilt*sin),y:view.cy+view.scale*(x*sin+y*tilt*cos)};
   }
-  return {view,toWorld,toScreen,zoomAt,pan,followAt,originMarker};
+  return {view,toWorld,toScreen,zoomAt,pan,followAt,originMarker,minimumZoom};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalCamera;
