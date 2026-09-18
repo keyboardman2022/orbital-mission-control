@@ -76,12 +76,12 @@ test('paged loader fails a nonadvancing cursor instead of looping forever',async
 
 async function missionHarness(status='terminated'){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js');
-  const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
+  const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
   function node(id){if(nodes.has(id))return nodes.get(id);let value='';const result={id,children:[],style:{},dataset:{},checked:false,hidden:false,disabled:false,textContent:'',get value(){return value;},set value(v){value=String(v);},setAttribute(){},removeAttribute(){},addEventListener(){},after(){},remove(){},append(...items){this.children.push(...items);},querySelector(selector){return node(id+selector);},getContext(){return context2d;},getBoundingClientRect(){return {width:1000,height:800,left:0,top:0};},classList:{toggle(){},add(){},remove(){}}};nodes.set(id,result);return result;}
   for(const [id,value]of Object.entries({name:'',x:units.toKm(500),y:0,massKg:1000,speed:0,directionDeg:0,rate:1}))node(id).value=value;
   const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1}};
   const reply=data=>({ok:true,json:async()=>data});
-  const sandbox={OrbitalHistory:history,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));},satellite(){},impact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:()=>[],hidden:false},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
+  const sandbox={OrbitalHistory:history,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:()=>[],hidden:false},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
     if(path.includes('/trajectory?'))return new Promise(resolve=>requests.push({path,options,resolve:data=>resolve(reply(data))}));
     if(path==='/api/session/guest')return reply({user:{id:'user'},csrfToken:'token'});
     if(path==='/api/model')return reply({model:model.MODEL,server:{tick:1}});
@@ -91,7 +91,7 @@ async function missionHarness(status='terminated'){
   vm.runInNewContext(fs.readFileSync(require.resolve('../mission.js'),'utf8'),sandbox);
   const flush=()=>new Promise(resolve=>setImmediate(resolve));await flush();
   await node('satellites').children[0].onclick();
-  return {node,requests,flush,frames,streams,satellite,liveRenders};
+  return {node,requests,flush,frames,streams,satellite,liveRenders,liveTrails};
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
@@ -152,18 +152,35 @@ test('mission switching satellites rejects a late history window and preserves p
   assert.equal(h.node('replay').hidden,true);assert.equal(h.node('historyMessage').textContent,'');
 });
 
-test('mission smooths selected 5 Hz and background 1 Hz positions across their full update intervals',async()=>{
-  const h=await missionHarness('active'),state={...h.satellite.state,tick:240002,x:600};
-  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{id:'one',state,status:'active'},{...h.satellite,id:'other'}],server:{tick:2}})});
-  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{id:'other',state,status:'active'}],server:{tick:3}})});
-  h.frames[0](100);
-  assert.ok(Math.abs(h.liveRenders[0].x-550)<1e-9);
-  assert.ok(Math.abs(h.liveRenders[1].x-510)<1e-9);
-  h.frames[1](200);
-  assert.ok(Math.abs(h.liveRenders[2].x-600)<1e-9);
-  assert.ok(Math.abs(h.liveRenders[3].x-520)<1e-9);
-  for(let frame=2;frame<10;frame++)h.frames[frame]((frame+1)*100);
-  assert.ok(Math.abs(h.liveRenders.at(-1).x-600)<1e-9);
+test('mission draws a physical arc and its trail between sparse live packets',async()=>{
+  const M=require('../shared/simulation.js'),h=await missionHarness('active');
+  const state=M.createState({name:'arc',position:{x:220,y:0},massKg:1000,speed:M.circularSpeed(220),directionDeg:90},{continuousTracking:true});
+  const send=s=>h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{id:'one',state:{...s},status:'active'}],server:{tick:2}})});
+  state.tick=240010;state.elapsedSeconds=state.tick/240;send(state);
+  for(let i=0;i<48;i++)M.step(state);send(state);h.frames[0](100);
+  assert.ok(Math.abs(Math.hypot(h.liveRenders.at(-1).x,h.liveRenders.at(-1).y)-220)<.01);
+  assert.ok(h.liveTrails.at(-1).length>10);
+});
+
+test('mission freezes observation during recovery instead of drawing accelerated jumps',async()=>{
+  const h=await missionHarness('active');h.frames[0](10);const before=h.liveRenders.at(-1);
+  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{id:'one',state:{...h.satellite.state,tick:250000,x:-500},status:'active'}],server:{tick:2,status:'recovering',lagSeconds:1000}})});
+  h.frames[1](110);assert.equal(h.liveRenders.at(-1).x,before.x);
+  assert.ok(h.node('viewMode').textContent.includes('补算'));
+  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[],server:{tick:3,status:'running',lagSeconds:0}})});
+  h.frames[2](210);assert.equal(h.liveRenders.at(-1).x,-500);
+  assert.equal(h.liveTrails.at(-1).length,1);
+});
+
+test('a new live packet starts from the position currently on screen without jumping ahead',async()=>{
+  const M=require('../shared/simulation.js'),h=await missionHarness('active');
+  const state=M.createState({name:'arc',position:{x:220,y:0},massKg:1000,speed:M.circularSpeed(220),directionDeg:90},{continuousTracking:true});
+  state.tick=240010;state.elapsedSeconds=state.tick/240;
+  const send=()=>h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{id:'one',state:{...state},status:'active'}],server:{tick:2}})});
+  send();for(let i=0;i<48;i++)M.step(state);send();h.frames[0](100);const before=h.liveRenders.at(-1);
+  for(let i=0;i<48;i++)M.step(state);send();h.frames[1](100);
+  assert.ok(Math.hypot(h.liveRenders.at(-1).x-before.x,h.liveRenders.at(-1).y-before.y)<1e-9);
+  h.frames[2](300);assert.ok(Math.hypot(h.liveRenders.at(-1).x-state.x,h.liveRenders.at(-1).y-state.y)<1e-9);
 });
 
 test('mission pins the first page cutoff before an interrupted initial window finishes loading',async()=>{

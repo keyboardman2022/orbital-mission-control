@@ -33,5 +33,15 @@
     }
   }
   function mergeSnapshot(old,incoming){return old?{...old,...incoming}:incoming.initial?incoming:null;}
-  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,loadWindow,mergeSnapshot};
+  // Reconstruct only short live intervals using the server's fixed-step dynamics.
+  // A long offline catch-up cannot be inferred from two endpoints.
+  function liveSegment(a,b,model){
+    const ticks=b.tick-a.tick;
+    if(!Number.isSafeInteger(ticks)||ticks<=0||ticks>model.MODEL.tickRate*2)return null;
+    const state={...a,status:'active',escapeRadius:a.escapeRadius||1e30,continuousTracking:true},points=[{...a}];
+    for(let i=0;i<ticks;i++){model.step(state);if(state.status!=='active')return null;points.push(model.snapshot(state));}
+    if(Math.hypot(state.x-b.x,state.y-b.y)>1e-6||Math.hypot(state.vx-b.vx,state.vy-b.vy)>1e-6)return null;
+    points[points.length-1]={...b};return points;
+  }
+  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,loadWindow,mergeSnapshot,liveSegment};
 });
