@@ -17,7 +17,7 @@ npm start
 - SQLite 保存出生档案、轨迹、关键事件与恢复状态。关闭浏览器后仍运行；本机服务或电脑停止时暂停实际计算，下次启动按经过时间补算，落后时显示恢复进度。
 - “暂停观察 / 清空画面”不影响服务器。“终止追踪”保留历史，停止后不能恢复原卫星。
 - 回放读取归档点并插值显示，CSV/JSON 导出固定截止 tick 和记录序号；CSV 第一条数据的 `metadata_json` 列包含模型、单位、采样方法与事件元数据。
-- 实时画面最多绘制最近 100 个对象并保留当前选中对象；较老的对象可分页选择并继续订阅。回放单次最多读 100000 点，更多数据使用完整导出。
+- 实时画面最多绘制最近 100 个对象并保留当前选中对象；较老的对象可分页选择并继续订阅。回放提供完整生命时间轴，按需读取当前位置附近最多20模拟秒的窗口，缓存上限8000点；导出不受显示窗口限制。
 - 后台初始容量保护为 1000 个并发活跃/排队对象，可通过 `ORBITAL_MAX_ACTIVE` 配置；不限制累计发射次数。达到容量时明确拒绝新请求，保留已有轨迹。正式容量取决于硬件和采样密度，需要实测调整。
 
 ### 时间、单位和误差
@@ -36,13 +36,21 @@ npm start
 
 **科学适用边界：** Paczyński–Wiita模型是伪牛顿近似，不是广义相对论求解器；标定SI单位并不使它成为精确的真实黑洞模型。速度读数为近似模型的坐标速度；高速和近视界需要相对论修正，模型甚至会给出超光速数值。此时页面显示“超出物理适用范围”，导出保留该模型数值并明确 `physicalSpeedValid=false`，不可当作真实速度。不给结果强行截成光速以伪造轨迹一致性。
 
-预览限60模拟秒，不作为后台记录。轨迹每模拟秒至少采样一次；半径小于264场景单位时每积分步采样，或线性预测偏差超过0.5场景单位时加密，出生与终态必存。回放中的速度在归档速度分量间插值，属于显示估计。测试中半径80、切向场景速度1000的一秒位置与16倍细步长相差约0.352场景单位；径向捕获时间误差小于0.002模拟秒。这些是已测工况的误差，不能当作全参数保证。
+预览限60模拟秒，不作为后台记录。新的 `time-linear-error-v1` 采样器以最多240次积分的一秒块检查按时间线性插值的误差：位置向量误差≤0.1 km，默认速度向量误差≤`max(0.1 km/s, 原始速度大小×0.001)`。选择的每一段都对全部中间积分点验证，保留精确端点、出生、终态和导出截止；搜索不保证最少点数。每次检查点也提交未满块的精确端点与完整恢复状态。误差保证只相对于原始240 Hz积分时刻，并不是连续时间或真实物理误差保证。设置环境变量 `ORBITAL_VELOCITY_RELATIVE_TOLERANCE=0` 可使新记录采用固定0.1 km/s严格速度误差；允许范围0–0.01，默认0.001（0.1%）。每颗卫星固定保存自己的采样配置，重启修改配置仅影响新卫星和首次升级的旧活跃卫星，不改变已采用新采样器的对象。严格模式在高速轨道上可能明显增加记录量。
+
+旧点不重新简化，活跃旧档案以 `sampling.legacyThroughSeq` 标记旧政策边界，导出同时披露旧采样政策；旧终态档案继续披露原采样规则（一秒基础间隔、4r_s内每步、线性预测误差0.5场景单位加密）。回放速度由已记录速度分量插值得到。测试中半径80、切向场景速度1000的一秒积分位置与16倍细步长相差约0.352场景单位；径向捕获时间误差小于0.002模拟秒。这些是已测工况的误差，不能当作全参数保证。
+
+相同240 Hz轨迹对照旧采样规则：半径100近轨道364→71点，半径330两圈229→214点，半径2000远轨道386→386点，径向捕获38→33点。默认模式的已测最大位置重建误差约0.09697 km，速度误差符合逐点0.1%/0.1 km/s容差。节省取决于轨道，不把相对每一步积分的减少量当作相对旧程序的存储收益。
 
 单位依据：[IAU 2015 Resolution B3](https://arxiv.org/abs/1510.07674)、[NIST光速常量](https://physics.nist.gov/cuu/Constants/Value/c.html)。模型及速度限制依据：[Abramowicz (2009)](https://arxiv.org/html/0904.0913v1)。
 
 ### 持久化、备份及部署
 
-默认数据库：`data/orbital.sqlite`，导出文件：`data/exports/`。设置 `ORBITAL_DATA_DIR` 可更换数据目录。数据库、WAL、恢复凭证和导出不会通过静态文件路由暴露。导出文件保留7天，原始轨迹不自动删除，可重新导出。
+默认数据库：`data/orbital.sqlite`，导出文件：`data/exports/`，无损轨迹归档：`data/trajectories/`。设置 `ORBITAL_DATA_DIR` 可更换数据目录。数据库、WAL、恢复凭证和归档不会通过静态文件路由暴露。导出文件保留7天，完整已记录轨迹永久保留，可重新导出。
+
+后台每秒尝试归档一个最多4096点的块，将早于世界时钟24小时（86400模拟秒）的点压缩为不可变gzip文件；计算落后时先补算。文件fsync、原子发布及SHA-256校验成功后，同一SQLite事务提交manifest并移除对应热行。读取按序号拼接冷、热记录；归档失败保留源行并在 `/health.storage.archiveError` 报告。归档释放的SQLite页会被后续写入复用，数据库文件不会立即自动缩小；不自动删除归档文件。备份必须包含归档文件，不能只保留主数据库。
+
+实时SSE初次发送完整档案，后续只发送变更状态；所选对象最高5Hz，其余对象最高1Hz，出生与终态立即发送。导出按2000点分页读取固定 `cutoffSeq`，每页释放SQLite读取事务再写文件，避免慢导出长时间阻挡WAL检查点。`/health.storage` 提供进程内原始步数、保留点数、缓冲状态数量、待写点数、检查点耗时、归档点数与DB/WAL大小；计数重启归零，并非并发容量保证。
 
 ```powershell
 npm test
@@ -51,7 +59,7 @@ npm run backup
 node server/backup.js D:\Codex\orbital\backups\manual.sqlite
 ```
 
-备份使用 SQLite 在线备份 API 并执行 integrity_check。恢复时先停止服务，把备份作为一个**新的空数据目录**中的 `orbital.sqlite`，再把 `ORBITAL_DATA_DIR` 指向该目录启动；不要把备份直接覆盖到仍运行的数据库或残留 WAL 上。恢复后会从备份进度补算。
+备份使用 SQLite 在线备份 API 并执行 integrity_check，同时将快照manifest引用的归档校验后复制到 `<备份文件>.trajectories/`，全部完成后才发布备份数据库。恢复时先停止服务，把备份作为一个**新的空数据目录**中的 `orbital.sqlite`，并将配套 `.trajectories` 目录复制为该新目录中的 `trajectories/`，再把 `ORBITAL_DATA_DIR` 指向该目录启动；不要把备份直接覆盖到仍运行的数据库或残留WAL上。升级前没有归档的旧备份无需配套目录。恢复后会从备份进度补算。
 
 提供 Dockerfile / compose.yaml：`docker compose up -d --build`，数据保存在持久化卷，配置为异常自动重启，默认只绑定主机127.0.0.1。此配置文件已提供，但尚未在本机执行 Docker 部署。公网部署需自行配置 HTTPS 反向代理，并将 `PUBLIC_ORIGIN` 设置为准确的外部源；生产服务应监控 `/health`、磁盘、备份和模拟落后时间。
 
@@ -59,7 +67,7 @@ node server/backup.js D:\Codex\orbital\backups\manual.sqlite
 
 ### 文件职责
 
-`shared/units.js` 为共享科学标定和速度换算；`shared/simulation.js` 为正式物理核心；`server/engine.js` 为单写者数据与模拟状态；`server/simulation-worker.js` 驱动固定步长；`server/index.js` 提供接口、身份与 SSE；`server/export-worker.js` 流式生成导出；`mission.html/css/js` 为控制台；`preview-worker.js` 为本地预测。
+`shared/units.js` 为共享科学标定和速度换算；`shared/simulation.js` 为正式物理核心；`server/trajectory-sampler.js` 控制记录误差；`server/trajectory-store.js` 负责冷、热轨迹和无损归档；`server/engine.js` 为单写者数据与模拟状态；`server/simulation-worker.js` 驱动固定步长；`server/index.js` 提供接口、身份与SSE；`server/stream-snapshot.js` 生成轻量增量；`server/export-worker.js` 分页流式生成导出；`shared/history-window.js` 为有界回放读取与插值；`mission.html/css/js` 为控制台；`preview-worker.js` 为本地预测。
 
 ## 原始视觉演示
 

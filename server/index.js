@@ -4,9 +4,10 @@ const {Worker}=require('node:worker_threads');
 const {join,resolve,basename}=require('node:path');
 const {mkdirSync,openSync,writeFileSync,closeSync,readFileSync,unlinkSync,existsSync,statSync,createReadStream,readdirSync}=require('node:fs');
 const {timingSafeEqual}=require('node:crypto');
+const {createStreamState,buildSnapshot}=require('./stream-snapshot.js');
 const ROOT=resolve(__dirname,'..');
 const HELD_LOCKS=new Set();
-const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','preview-worker.js','orbital-visuals.js','shared/simulation.js','shared/units.js']);
+const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','preview-worker.js','orbital-visuals.js','shared/simulation.js','shared/units.js','shared/history-window.js']);
 const TYPES={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',json:'application/json; charset=utf-8',csv:'text/csv; charset=utf-8'};
 const error=(status,message)=>Object.assign(new Error(message),{status});
 function acquireLock(dataDir){
@@ -19,11 +20,11 @@ function acquireLock(dataDir){
   }
   const fd=openSync(path,'wx');writeFileSync(fd,JSON.stringify({pid:process.pid}));closeSync(fd);HELD_LOCKS.add(path);return ()=>{HELD_LOCKS.delete(path);try{unlinkSync(path);}catch{}};
 }
-async function startServer({port=Number(process.env.PORT||4174),host=process.env.HOST||'127.0.0.1',dataDir=process.env.ORBITAL_DATA_DIR||join(ROOT,'data'),publicOrigin=process.env.PUBLIC_ORIGIN,maxActive=Number(process.env.ORBITAL_MAX_ACTIVE||1000)}={}){
+async function startServer({port=Number(process.env.PORT||4174),host=process.env.HOST||'127.0.0.1',dataDir=process.env.ORBITAL_DATA_DIR||join(ROOT,'data'),publicOrigin=process.env.PUBLIC_ORIGIN,maxActive=Number(process.env.ORBITAL_MAX_ACTIVE||1000),velocityRelativeTolerance=Number(process.env.ORBITAL_VELOCITY_RELATIVE_TOLERANCE??'.001')}={}){
   if(!Number.isSafeInteger(maxActive)||maxActive<1)throw new Error('ORBITAL_MAX_ACTIVE 必须为正整数');
   dataDir=resolve(dataDir);mkdirSync(dataDir,{recursive:true});const exportsDir=join(dataDir,'exports');mkdirSync(exportsDir,{recursive:true});
   const unlock=acquireLock(dataDir),filename=join(dataDir,'orbital.sqlite');
-  const worker=new Worker(join(__dirname,'simulation-worker.js'),{workerData:{filename,maxActive}});
+  const worker=new Worker(join(__dirname,'simulation-worker.js'),{workerData:{filename,maxActive,velocityRelativeTolerance}});
   let rpcId=0,alive=true,closing=false;const pending=new Map(),streams=new Set(),exportWorkers=new Set(),exportQueue=[];
   const rpc=(method,...args)=>new Promise((resolve,reject)=>{
     if(!alive)return reject(error(503,'模拟服务暂不可用'));
@@ -94,7 +95,7 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
         if([...streams].filter(s=>s.userId===auth.userId).length>=5)throw error(429,'实时连接过多，请关闭多余页面');
         const selectedId=url.searchParams.get('satelliteId');if(selectedId)await rpc('get',auth.userId,selectedId);
         res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});res.write('retry: 2000\n\n');
-        const stream={res,token,userId:auth.userId,selectedId};streams.add(stream);res.on('close',()=>streams.delete(stream));return;
+        const stream={res,token,userId:auth.userId,selectedId,snapshot:createStreamState()};streams.add(stream);res.on('close',()=>streams.delete(stream));return;
       }
       if(path==='/api/satellites'&&req.method==='GET')return json(res,200,await rpc('list',auth.userId,Object.fromEntries(url.searchParams)));
       if(path==='/api/satellites'&&req.method==='POST'){
@@ -128,7 +129,7 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
     if(broadcasting||closing||!streams.size)return;broadcasting=true;
     try{
       const cache=new Map();for(const s of streams){
-        try{await rpc('authenticate',s.token);if(!cache.has(s.userId))cache.set(s.userId,await rpc('list',s.userId,{limit:100}));let data=cache.get(s.userId);if(s.selectedId&&!data.satellites.some(p=>p.id===s.selectedId))data={...data,satellites:[...data.satellites,await rpc('get',s.userId,s.selectedId)]};if(s.res.writableLength>1024*1024){s.res.destroy();continue;}s.res.write('event: snapshot\ndata: '+JSON.stringify(data)+'\n\n');}catch{s.res.end();}
+        try{await rpc('authenticate',s.token);if(!cache.has(s.userId))cache.set(s.userId,await rpc('list',s.userId,{limit:100}));let data=cache.get(s.userId);if(s.selectedId&&!data.satellites.some(p=>p.id===s.selectedId))data={...data,satellites:[...data.satellites,await rpc('get',s.userId,s.selectedId)]};if(s.res.writableLength>1024*1024){s.res.destroy();continue;}s.res.write('event: snapshot\ndata: '+JSON.stringify(buildSnapshot(s.snapshot,data,{selectedId:s.selectedId}))+'\n\n');}catch{s.res.end();}
       }
     }finally{broadcasting=false;}
   },200);
