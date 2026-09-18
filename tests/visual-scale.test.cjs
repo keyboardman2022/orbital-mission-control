@@ -20,3 +20,10 @@ test('satellite and trail do not add brightness; unresolved far objects produce 
  assert.ok(ctx.strokes.every(s=>s.blend==='source-over'&&s.width<.8&&s.opacity<.1));
  const count=ctx.strokes.length;V.renderTrail(ctx,points,project,3,1e-7);assert.equal(ctx.strokes.length,count);
 });
+test('map impact expands in screen pixels and remains visible at any world zoom',()=>{
+ const ctx=context(),arcs=[];ctx.arc=(x,y,r)=>arcs.push({x,y,r});ctx.fill=()=>{};
+ const wave=require('../shared/map-sweep.js').create({ids:[],origin:{x:250,y:200},width:1000,height:800});wave.flares=[];wave.advance(1.2);
+ V.renderMapImpact(ctx,wave);
+ assert.ok(arcs.some(a=>a.x===250&&a.y===200&&Math.abs(a.r-wave.radius)<1e-9));
+ assert.ok(ctx.strokes.some(s=>s.opacity>0&&s.width>=1));
+});

@@ -149,8 +149,19 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
       }
       ctx.restore();
     }
-    return {blackhole,trail:renderTrail,satellite:renderSatellite,impact};
+    return {blackhole,trail:renderTrail,satellite:renderSatellite,impact,mapImpact:renderMapImpact};
   }
-  return {create,satelliteAppearance,renderSatellite,renderTrail};
+  function renderMapImpact(ctx,wave){
+    const {x,y}=wave.origin,r=Math.max(1,wave.radius),fade=Math.max(0,1-Math.max(0,wave.age-wave.duration)/.6);
+    ctx.save();ctx.globalCompositeOperation='source-over';ctx.globalAlpha=fade;
+    const halo=ctx.createRadialGradient(x,y,Math.max(0,r-45),x,y,r+20);
+    halo.addColorStop(0,'rgba(164,219,166,0)');halo.addColorStop(.55,'rgba(164,255,194,.12)');halo.addColorStop(.75,'rgba(220,255,235,.26)');halo.addColorStop(1,'rgba(164,219,166,0)');
+    ctx.fillStyle=halo;ctx.fillRect(x-r-20,y-r-20,(r+20)*2,(r+20)*2);
+    for(let i=0;i<3;i++){ctx.beginPath();ctx.arc(x,y,r*(1-i*.035),0,Math.PI*2);ctx.strokeStyle=`rgba(198,255,210,${.8/(i+1)})`;ctx.lineWidth=i===0?2.5:1.2;ctx.stroke();}
+    const charge=Math.max(0,1-wave.age/.6);if(charge>0){const glow=ctx.createRadialGradient(x,y,0,x,y,120);glow.addColorStop(0,`rgba(255,249,224,${charge*.7})`);glow.addColorStop(.25,`rgba(255,183,109,${charge*.4})`);glow.addColorStop(1,'transparent');ctx.fillStyle=glow;ctx.fillRect(x-120,y-120,240,240);}
+    for(const f of wave.flares||[]){const age=wave.age-f.born,alpha=Math.max(0,1-age/.5);ctx.fillStyle=`rgba(255,219,157,${alpha})`;for(let i=0;i<8;i++){const angle=i*Math.PI/4;ctx.beginPath();ctx.arc(f.x+Math.cos(angle)*age*65,f.y+Math.sin(angle)*age*65,Math.max(.5,2*alpha),0,Math.PI*2);ctx.fill();}}
+    ctx.restore();
+  }
+  return {create,satelliteAppearance,renderSatellite,renderTrail,renderMapImpact};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalVisuals;

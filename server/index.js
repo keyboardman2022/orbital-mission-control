@@ -7,7 +7,7 @@ const {timingSafeEqual}=require('node:crypto');
 const {createStreamState,buildSnapshot}=require('./stream-snapshot.js');
 const ROOT=resolve(__dirname,'..');
 const HELD_LOCKS=new Set();
-const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','preview-worker.js','orbital-visuals.js','shared/simulation.js','shared/units.js','shared/history-window.js']);
+const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','preview-worker.js','orbital-visuals.js','shared/simulation.js','shared/units.js','shared/history-window.js','shared/map-sweep.js']);
 const TYPES={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',json:'application/json; charset=utf-8',csv:'text/csv; charset=utf-8'};
 const error=(status,message)=>Object.assign(new Error(message),{status});
 function acquireLock(dataDir){
@@ -100,6 +100,10 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       if(path==='/api/satellites'&&req.method==='GET')return json(res,200,await rpc('list',auth.userId,Object.fromEntries(url.searchParams)));
       if(path==='/api/satellites'&&req.method==='POST'){
         rate(req,'launch',120);return json(res,201,{satellite:await rpc('launch',auth.userId,await body(req))});
+      }
+      if(path==='/api/satellites/active'&&req.method==='GET')return json(res,200,await rpc('active',auth.userId));
+      if(path==='/api/satellites/terminate-many'&&req.method==='POST'){
+        rate(req,'sweep',120);const input=await body(req);return json(res,200,await rpc('terminateMany',auth.userId,input.ids));
       }
       const sat=path.match(/^\/api\/satellites\/([a-f0-9-]{36})(?:\/(trajectory|terminate|exports))?$/);
       if(sat){

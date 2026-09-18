@@ -76,22 +76,24 @@ test('paged loader fails a nonadvancing cursor instead of looping forever',async
 
 async function missionHarness(status='terminated'){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js');
-  const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
+  const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],sweepRequests=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
   function node(id){if(nodes.has(id))return nodes.get(id);let value='';const result={id,children:[],style:{},dataset:{},checked:false,hidden:false,disabled:false,textContent:'',get value(){return value;},set value(v){value=String(v);},setAttribute(){},removeAttribute(){},addEventListener(){},after(){},remove(){},append(...items){this.children.push(...items);},querySelector(selector){return node(id+selector);},getContext(){return context2d;},getBoundingClientRect(){return {width:1000,height:800,left:0,top:0};},classList:{toggle(){},add(){},remove(){}}};nodes.set(id,result);return result;}
   for(const [id,value]of Object.entries({name:'',x:units.toKm(500),y:0,massKg:1000,speed:0,directionDeg:0,rate:1}))node(id).value=value;
   const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1}};
   const reply=data=>({ok:true,json:async()=>data});
-  const sandbox={OrbitalHistory:history,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:()=>[],hidden:false},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
+  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:()=>[],hidden:false},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
     if(path.includes('/trajectory?'))return new Promise(resolve=>requests.push({path,options,resolve:data=>resolve(reply(data))}));
     if(path==='/api/session/guest')return reply({user:{id:'user'},csrfToken:'token'});
     if(path==='/api/model')return reply({model:model.MODEL,server:{tick:1}});
     if(path==='/api/satellites')return reply({satellites:[satellite],server:{tick:1},nextCursor:null});
+    if(path==='/api/satellites/active')return reply({satellites:[satellite],server:{tick:1}});
+    if(path==='/api/satellites/terminate-many'){sweepRequests.push(JSON.parse(options.body));return reply({satellites:[{...satellite,status:'terminated'}]});}
     return reply({satellite});
   }};
   vm.runInNewContext(fs.readFileSync(require.resolve('../mission.js'),'utf8'),sandbox);
   const flush=()=>new Promise(resolve=>setImmediate(resolve));await flush();
   await node('satellites').children[0].onclick();
-  return {node,requests,flush,frames,streams,satellite,liveRenders,liveTrails};
+  return {node,requests,flush,frames,streams,satellite,liveRenders,liveTrails,sweepRequests};
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
@@ -193,6 +195,23 @@ test('mission continues moving after reaching the latest packet endpoint',async(
   send();for(let i=0;i<48;i++)M.step(state);send();h.frames[0](200);const before=h.liveRenders.at(-1);
   h.frames[1](350);assert.ok(Math.hypot(h.liveRenders.at(-1).x-before.x,h.liveRenders.at(-1).y-before.y)>15);
   assert.ok(Math.abs(Math.hypot(h.liveRenders.at(-1).x,h.liveRenders.at(-1).y)-220)<.01);
+});
+test('map sweep progressively removes satellites, terminates them and rejects late active display patches',async()=>{
+  const h=await missionHarness('active');await h.node('sweepAll').onclick();
+  h.frames[0](10);assert.equal(h.sweepRequests.length,0);
+  for(let i=1;i<=30;i++){h.frames[i](i*100);await h.flush();}
+  assert.deepEqual(h.sweepRequests.flatMap(r=>r.ids),['one']);
+  const rendered=h.liveRenders.length;
+  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{...h.satellite}],server:{tick:3}})});
+  h.frames[31](3100);assert.equal(h.liveRenders.length,rendered);
+  assert.equal(h.node('sweepAll').disabled,false);
+});
+test('an empty map still plays the wave and finishes without attempting to terminate historical satellites',async()=>{
+  const h=await missionHarness('terminated');await h.node('sweepAll').onclick();
+  assert.equal(h.node('sweepAll').disabled,true);
+  for(let i=0;i<=31;i++)h.frames[i](i*100);
+  assert.equal(h.sweepRequests.length,0);assert.equal(h.node('sweepAll').disabled,false);
+  assert.ok(h.node('notice').textContent.includes('已清除 0'));
 });
 
 test('mission pins the first page cutoff before an interrupted initial window finishes loading',async()=>{

@@ -38,4 +38,13 @@ test('HTTP launch, ownership, CSRF, persistence, pagination, recovery and export
   else {assert.match(download.data,/elapsed_sim_seconds/);assert.match(download.data,/terminated/);}
  }
  const recovered=await request('/api/session/recover',{...b,method:'POST',body:{recoveryKey:ga.data.recoveryKey}});assert.equal(recovered.data.user.id,ga.data.user.id);
+ const ownerOne=(await request('/api/satellites',{...a,method:'POST',body:{...initial,idempotencyKey:'sweep-owner-one'}})).data.satellite;
+ const otherSession=await request('/api/session/guest',{method:'POST',body:{}}),otherAuth={cookie:otherSession.res.headers.get('set-cookie').split(';')[0],csrfToken:otherSession.data.csrfToken};
+ const otherOne=(await request('/api/satellites',{...otherAuth,method:'POST',body:{...initial,idempotencyKey:'sweep-other-one'}})).data.satellite;
+ assert.deepEqual((await request('/api/satellites/active',a)).data.satellites.map(s=>s.id),[ownerOne.id]);
+ assert.equal((await request('/api/satellites/terminate-many',{...a,csrfToken:undefined,method:'POST',body:{ids:[ownerOne.id]}})).res.status,403);
+ assert.equal((await request('/api/satellites/terminate-many',{...a,method:'POST',body:{ids:[ownerOne.id,otherOne.id]}})).res.status,404);
+ assert.equal((await request('/api/satellites/'+ownerOne.id,a)).data.satellite.status,'active');
+ const cleared=await request('/api/satellites/terminate-many',{...a,method:'POST',body:{ids:[ownerOne.id]}});assert.equal(cleared.res.status,200);assert.equal(cleared.data.satellites[0].status,'terminated');
+ assert.equal((await request('/api/satellites/'+otherOne.id,otherAuth)).data.satellite.status,'active');
 });

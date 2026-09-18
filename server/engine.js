@@ -177,6 +177,7 @@ class Engine{
     const rows=this.db.prepare('SELECT rowid AS cursor,id,record FROM satellites WHERE user_id=? AND rowid<? ORDER BY rowid DESC LIMIT ?').all(userId,after,count+1);
     return {satellites:rows.slice(0,count).map(row=>this.publicRecord(this.records.get(row.id)||JSON.parse(row.record))),nextCursor:rows.length>count?rows[count-1].cursor:null,server:this.health()};
   }
+  active(userId){return {satellites:[...this.records.values()].filter(r=>r.ownerId===userId&&['active','queued'].includes(r.status)).map(r=>this.publicRecord(r)),server:this.health()};}
   trajectory(userId,id,query={}){
     const r=this.owned(userId,id);if(query.cutoffSeq===undefined)this.checkpoint();
     const after=integer(query.cursor,0),count=integer(query.limit,1000,1,5000),from=integer(query.fromTick,0),to=integer(query.toTick,r.state.tick);
@@ -186,12 +187,17 @@ class Engine{
     return {points:rows.slice(0,count).map(p=>({...p,...U.telemetry(p,r.initial.calibration||U.SCALE)})),nextCursor:rows.length>count?rows[count-1].seq:null,cutoffTick:to,cutoffSeq,sampling:r.sampling||{version:'legacy-linear-prediction-v1'},
       calibration:r.initial.calibration||U.SCALE,calibrationInferred:!r.initial.calibration};
   }
-  terminate(userId,id){
+  terminate(userId,id,{checkpoint=true}={}){
     const r=this.owned(userId,id);if(!['active','queued'].includes(r.status))return this.publicRecord(r);
     this.records.set(id,r);r.state.event={type:'terminated',substepFraction:0};
     if(r.birthTick===null){r.status='terminated';r.state.status='terminated';r.endReason='terminated';this.dirty.add(id);}
     else this.finish(r,'terminated');
-    this.checkpoint();return this.publicRecord(r);
+    if(checkpoint)this.checkpoint();return this.publicRecord(r);
+  }
+  terminateMany(userId,ids){
+    if(!Array.isArray(ids)||ids.length>1000||ids.some(id=>typeof id!=='string'))fail(422,'批量终止参数无效');
+    const unique=[...new Set(ids)];for(const id of unique)this.owned(userId,id);
+    const satellites=unique.map(id=>this.terminate(userId,id,{checkpoint:false}));this.checkpoint();return {satellites,server:this.health()};
   }
   prepareExport(userId,id,format){
     if(!['csv','json'].includes(format))fail(422,'仅支持 CSV 和 JSON');
