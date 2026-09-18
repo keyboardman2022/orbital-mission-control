@@ -1,14 +1,15 @@
 'use strict';
 (function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory();else root.OrbitalSweep=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
-  function create({ids,origin}){
-    const extent=1200;
-    return {origin:{...origin},extent,age:0,duration:8,remaining:new Set(ids),
-      get progress(){return Math.min(1,this.age/this.duration);},
-      get radius(){return this.extent*this.progress;},
+  function viewportExtent(view,width,height,camera){return Math.max(...[[0,0],[width,0],[0,height],[width,height]].map(([x,y])=>{const p=camera.toWorld(x,y,view);return Math.hypot(p.x,p.y);}))*1.05;}
+  function create({ids,origin,extent=1200}){
+    return {origin:{...origin},extent,age:0,duration:8,speed:extent/8,_radius:0,remaining:new Set(ids),
+      get progress(){return Math.min(1,this.radius/this.extent);},
+      get radius(){return this._radius;},
       get done(){return this.age>=this.duration+.6;},
-      advance(seconds){this.age+=Math.max(0,seconds);},
+      advance(seconds){const dt=Math.max(0,seconds);this.age+=dt;this._radius=Math.min(this.extent,this._radius+this.speed*dt);},
+      extendTo(distance){if(distance<=this.extent*(1+1e-6))return;const remaining=Math.max(4,this.duration-this.age);this.extent=distance;this.speed=(distance-this.radius)/remaining;this.duration=this.age+remaining;},
       hits(positions){const hits=[];for(const id of this.remaining){const p=positions.get(id);if(this.progress>=1||(p&&Math.hypot(p.x-this.origin.x,p.y-this.origin.y)<=this.radius)){hits.push(id);this.remaining.delete(id);}}return hits;}
     };
   }
-  return {create};
+  return {create,viewportExtent};
 });

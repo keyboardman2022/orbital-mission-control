@@ -261,7 +261,7 @@
   }
   function finishSweep(){if(mapWave?.done&&!sweepPending.size&&!sweepSending){const count=mapWave.total,failed=mapWave.failures;mapWave=null;sweepBusy=false;$('sweepAll').textContent='全图冲击波';$('viewMode').textContent=recovering?'服务器补算中 · 连续物理预演':'实时观察';updateLaunch();message(`冲击波已扫过全图 · 已清除 ${count-failed} 颗卫星，历史轨迹仍可回放与导出。${failed?` ${failed} 颗清除失败，已恢复显示，可重新尝试。`:''}`);}}
   function advanceSweep(seconds){
-    if(!mapWave)return;mapWave.advance(seconds);
+    if(!mapWave)return;mapWave.extendTo(OrbitalSweep.viewportExtent(view,width,height,OrbitalCamera));mapWave.advance(seconds);
     $('viewMode').textContent='全图冲击波 · 半径 '+units.formatKm(units.toKm(mapWave.radius));
     const positions=new Map();for(const id of mapWave.remaining){const s=satellites.get(id),p=observedPosition(id)||s?.state;if(p)positions.set(id,{x:p.x,y:p.y});}
     for(const id of mapWave.hits(positions)){
@@ -278,7 +278,7 @@
       const targets=(data.satellites||[]).filter(s=>['active','queued'].includes(s.status));
       clearHistory();historyMode=false;playing=false;hiddenLive=false;paused=false;$('pause').textContent='暂停观察';$('replay').hidden=true;
       for(const s of targets)satellites.set(s.id,s);
-      mapWave=OrbitalSweep.create({ids:targets.map(s=>s.id),origin:{x:0,y:0}});mapWave.flares=[];mapWave.total=targets.length;mapWave.failures=0;
+      mapWave=OrbitalSweep.create({ids:targets.map(s=>s.id),origin:{x:0,y:0},extent:OrbitalSweep.viewportExtent(view,width,height,OrbitalCamera)});mapWave.flares=[];mapWave.total=targets.length;mapWave.failures=0;
       $('sweepAll').textContent='冲击波扩散中…';$('viewMode').textContent='全图冲击波';message('冲击波正在扩散，扫过的卫星将终止运行；已有轨迹保留。');
     }catch(e){if(epoch===sweepEpoch){sweepBusy=false;$('sweepAll').textContent='全图冲击波';updateLaunch();message(e.message);}}
   };
