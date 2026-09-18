@@ -29,7 +29,7 @@
   function readInput(){return {name:$('name').value.trim(),position:{x:number('x'),y:number('y')},massKg:number('massKg'),speed:number('speed'),directionDeg:number('directionDeg'),unitSystem:'si-km-v1',calibrationVersion:scale.version,modelVersion:model.MODEL.version,dynamicsVersion:model.MODEL.dynamics.version};}
   function worldPosition(){return {x:units.fromKm(number('x')),y:units.fromKm(number('y'))};}
   function normalize(input){const result=model.validateLaunch(input);if(result&&result.valid===false)throw new Error(result.error||result.message||'参数无效');return result.normalized||result.value||result;}
-  function updateLaunch(){ $('launch').disabled=!draft||!online||!sessionReady||launchBusy||sweepBusy;$('sweepAll').disabled=!online||!sessionReady||sweepBusy||launchBusy; }
+  function updateLaunch(){ $('launch').disabled=!draft||!online||!sessionReady||launchBusy||sweepBusy;$('sweepAll').disabled=mapWave?mapWave.cancelled:!online||!sessionReady||sweepBusy||launchBusy; }
   function validate(){
     fields.forEach(id=>{$(id).removeAttribute('aria-invalid');const hint=$(id+'Error');if(hint){hint.hidden=true;hint.textContent='';}});draftVisible=true;draft=null;invalidCapture=false;preview=[];previewToken++;
     const input=readInput(), errors=[];
@@ -259,10 +259,11 @@
     catch(e){if(epoch===sweepEpoch){if(mapWave)mapWave.failures+=ids.length;for(const id of ids){sweptIds.delete(id);const s=satellites.get(id);if(s)setLiveRecord(s);}message('部分卫星清除失败，已恢复显示：'+e.message);}}
     finally{if(epoch===sweepEpoch){sweepSending=false;if(sweepPending.size)sendSweep(true);finishSweep();}}
   }
-  function finishSweep(){if(mapWave?.done&&!sweepPending.size&&!sweepSending){const count=mapWave.total,failed=mapWave.failures;mapWave=null;sweepBusy=false;$('sweepAll').textContent='全图冲击波';$('viewMode').textContent=recovering?'服务器补算中 · 连续物理预演':'实时观察';updateLaunch();message(`冲击波已扫过全图 · 已清除 ${count-failed} 颗卫星，历史轨迹仍可回放与导出。${failed?` ${failed} 颗清除失败，已恢复显示，可重新尝试。`:''}`);}}
+  function finishSweep(){if(mapWave?.done&&!sweepPending.size&&!sweepSending){const count=mapWave.total-mapWave.remaining.size,failed=mapWave.failures,cancelled=mapWave.cancelled;mapWave=null;sweepBusy=false;$('sweepAll').textContent='全图冲击波';$('viewMode').textContent=recovering?'服务器补算中 · 连续物理预演':'实时观察';updateLaunch();message(`${cancelled?'冲击波已停止，未扫到的卫星继续运行':'冲击波已扫过全图'} · 已清除 ${count-failed} 颗卫星，历史轨迹仍可回放与导出。${failed?` ${failed} 颗清除失败，已恢复显示，可重新尝试。`:''}`);}}
   function advanceSweep(seconds){
-    if(!mapWave)return;mapWave.extendTo(OrbitalSweep.viewportExtent(view,width,height,OrbitalCamera));mapWave.advance(seconds);
-    $('viewMode').textContent='全图冲击波 · 半径 '+units.formatKm(units.toKm(mapWave.radius));
+    if(!mapWave)return;if(mapWave.cancelled){finishSweep();return;}mapWave.extendTo(OrbitalSweep.viewportExtent(view,width,height,OrbitalCamera));mapWave.advance(seconds);
+    const left=Math.max(0,mapWave.duration-mapWave.age),eta=left<60?Math.ceil(left)+' 秒':left<3600?(left/60).toFixed(1)+' 分钟':left<86400?(left/3600).toFixed(1)+' 小时':(left/86400).toFixed(1)+' 天';
+    $('viewMode').textContent='恒速冲击波 · 半径 '+units.formatKm(units.toKm(mapWave.radius))+' · 剩余约 '+eta;
     const positions=new Map();for(const id of mapWave.remaining){const s=satellites.get(id),p=observedPosition(id)||s?.state;if(p)positions.set(id,{x:p.x,y:p.y});}
     for(const id of mapWave.hits(positions)){
       const p=positions.get(id);if(p)mapWave.flares.push({x:p.x,y:-p.y,born:mapWave.age});
@@ -272,6 +273,7 @@
     sendSweep(mapWave.progress>=1);finishSweep();
   }
   $('sweepAll').onclick=async()=>{
+    if(mapWave){mapWave.cancel();$('sweepAll').textContent='正在停止…';updateLaunch();finishSweep();return;}
     if(sweepBusy||!online||!sessionReady)return;sweepBusy=true;updateLaunch();const epoch=++sweepEpoch;$('sweepAll').textContent='正在蓄能…';
     try{
       const data=await api('/api/satellites/active');if(epoch!==sweepEpoch)return;
@@ -279,7 +281,7 @@
       clearHistory();historyMode=false;playing=false;hiddenLive=false;paused=false;$('pause').textContent='暂停观察';$('replay').hidden=true;
       for(const s of targets)satellites.set(s.id,s);
       mapWave=OrbitalSweep.create({ids:targets.map(s=>s.id),origin:{x:0,y:0},extent:OrbitalSweep.viewportExtent(view,width,height,OrbitalCamera)});mapWave.flares=[];mapWave.total=targets.length;mapWave.failures=0;
-      $('sweepAll').textContent='冲击波扩散中…';$('viewMode').textContent='全图冲击波';message('冲击波正在扩散，扫过的卫星将终止运行；已有轨迹保留。');
+      $('sweepAll').textContent='停止冲击波';updateLaunch();$('viewMode').textContent='恒速冲击波';message('冲击波以固定速度扩散，视距越远需要越久。可随时停止；扫过的卫星终止运行，已有轨迹保留。');
     }catch(e){if(epoch===sweepEpoch){sweepBusy=false;$('sweepAll').textContent='全图冲击波';updateLaunch();message(e.message);}}
   };
   function frame(now){const elapsed=Math.max(0,(now-lastFrame)/1000),dt=Math.min(elapsed,.1);lastFrame=now;if(!paused){liveTime+=elapsed;if(!document.hidden){advanceLive(elapsed);advanceSweep(Math.min(elapsed,.1));}}if(!paused&&!document.hidden&&!reducedMotion.matches)visualTime+=dt*.3;impactWaves=impactWaves.filter(w=>visualTime-w.born<2.4);if(historyMode&&playing&&!historyLoading){const next=Math.min(Number($('timeline').max),replayElapsed+dt*number('rate'));if(!cachedHistory(next))requestHistory(next,true);else{replayElapsed=next;$('timeline').value=replayElapsed;if(replayElapsed>=Number($('timeline').max)){playing=false;$('play').textContent='播放';}updateReplayLabel();}}if(liveTime-lastTelemetryTime>=.1){renderList();renderDetail();lastTelemetryTime=liveTime;}draw();requestAnimationFrame(frame);}requestAnimationFrame(frame);

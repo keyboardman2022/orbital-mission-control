@@ -208,10 +208,17 @@ test('map sweep progressively removes satellites, terminates them and rejects la
 });
 test('an empty map still plays the wave and finishes without attempting to terminate historical satellites',async()=>{
   const h=await missionHarness('terminated');await h.node('sweepAll').onclick();
-  assert.equal(h.node('sweepAll').disabled,true);
+  assert.equal(h.node('sweepAll').textContent,'停止冲击波');
   for(let i=0;i<=90;i++)h.frames[i](i*100);
   assert.equal(h.sweepRequests.length,0);assert.equal(h.node('sweepAll').disabled,false);
   assert.ok(h.node('notice').textContent.includes('已清除 0'));
+});
+test('stopping a wave leaves satellites it has not reached running',async()=>{
+  const h=await missionHarness('active');await h.node('sweepAll').onclick();h.frames[0](100);
+  assert.equal(h.node('sweepAll').disabled,false);await h.node('sweepAll').onclick();
+  h.frames[1](200);await h.flush();
+  assert.equal(h.sweepRequests.length,0);assert.equal(h.node('sweepAll').textContent,'全图冲击波');
+  assert.ok(h.node('notice').textContent.includes('已停止'));assert.ok(h.liveRenders.length>0);
 });
 
 test('mission pins the first page cutoff before an interrupted initial window finishes loading',async()=>{

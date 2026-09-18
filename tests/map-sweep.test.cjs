@@ -16,13 +16,19 @@ test('wave expansion is slower and its world distance does not depend on viewpor
 });
 test('at minimum zoom the wave reaches every visible world corner',()=>{
   const S=require('../shared/map-sweep.js'),C=require('../camera.js'),view=C.view(1000,800,1e-7);
-  const extent=S.viewportExtent(view,1000,800,C),wave=S.create({ids:[],origin:{x:0,y:0},extent});wave.advance(8);
+  const extent=S.viewportExtent(view,1000,800,C),wave=S.create({ids:[],origin:{x:0,y:0},extent});wave.advance(wave.duration);
   for(const [x,y]of [[0,0],[1000,0],[0,800],[1000,800]]){const p=C.toWorld(x,y,view);assert.ok(wave.radius>=Math.hypot(p.x,p.y));}
 });
 test('zooming out during expansion extends coverage without jumping the wave radius',()=>{
   const S=require('../shared/map-sweep.js'),wave=S.create({ids:[],origin:{x:0,y:0},extent:1000});wave.advance(4);
   const before=wave.radius;wave.extendTo(1e10);assert.equal(wave.radius,before);assert.equal(wave.done,false);
-  wave.advance(4);assert.ok(wave.radius>=1e10);
+  wave.advance(4);assert.equal(wave.radius,before+600);assert.ok(wave.duration>1e7);
+  wave.advance(wave.duration-wave.age);assert.ok(wave.radius>=1e10);
+});
+test('starting at a much larger view distance does not increase the physical propagation speed',()=>{
+  const S=require('../shared/map-sweep.js'),near=S.create({ids:[],origin:{x:0,y:0},extent:1000}),far=S.create({ids:[],origin:{x:0,y:0},extent:1e10});
+  near.advance(2);far.advance(2);assert.equal(near.radius,300);assert.equal(far.radius,300);
+  assert.equal(near.speed,far.speed);assert.ok(far.duration>near.duration);
 });
 test('map sweep discovers all owned live satellites and batch termination preserves their history',t=>{
   const dir=mkdtempSync(join(tmpdir(),'orbital-sweep-')),e=new Engine({filename:join(dir,'orbital.sqlite'),now:()=>1000});

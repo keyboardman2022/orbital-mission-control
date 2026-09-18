@@ -33,7 +33,7 @@ test('map impact uses camera projection so zooming out shrinks its radius and th
 });
 test('a wave spanning the minimum-zoom viewport remains visible instead of fading below pixel size',()=>{
  const ctx=context(),arcs=[];ctx.arc=(x,y,r)=>arcs.push(r);ctx.fill=()=>{};ctx.translate=()=>{};ctx.rotate=()=>{};ctx.scale=()=>{};
- const C=require('../camera.js'),S=require('../shared/map-sweep.js'),view=C.view(1000,800,1e-7),wave=S.create({ids:[],origin:{x:0,y:0},extent:1e10});wave.flares=[];wave.advance(4);
+ const C=require('../camera.js'),S=require('../shared/map-sweep.js'),view=C.view(1000,800,1e-7),wave=S.create({ids:[],origin:{x:0,y:0},extent:1e10});wave.flares=[];wave.advance(wave.duration/2);
  V.renderMapImpact(ctx,wave,view);
  assert.ok(arcs.length>0);assert.ok(ctx.strokes.some(s=>s.opacity>.1&&s.width*view.scale>=1));
 });
