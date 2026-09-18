@@ -1,8 +1,8 @@
 'use strict';
-(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory();else root.OrbitalSweep=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
+(function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory(require('./simulation.js'));else root.OrbitalSweep=factory(root.OrbitalModel);})(typeof globalThis!=='undefined'?globalThis:this,function(model){
   function viewportExtent(view,width,height,camera){return Math.max(...[[0,0],[width,0],[0,height],[width,height]].map(([x,y])=>{const p=camera.toWorld(x,y,view);return Math.hypot(p.x,p.y);}))*1.05;}
   function create({ids,origin,extent=1200}){
-    const speed=150;
+    const speed=model.MODEL.observation.sweepSpeed;
     return {origin:{...origin},extent,age:0,duration:extent/speed,speed,_radius:0,cancelled:false,remaining:new Set(ids),
       get progress(){return Math.min(1,this.radius/this.extent);},
       get radius(){return this._radius;},

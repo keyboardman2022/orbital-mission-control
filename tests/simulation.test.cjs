@@ -79,8 +79,8 @@ test('range extremes agree with a sixteen-times finer reference',()=>{
   for(const options of [
     {position:{x:80,y:0},speed:0,directionDeg:0},
     {position:{x:80,y:0},speed:1000,directionDeg:180},
-    {position:{x:10000,y:0},speed:1000,directionDeg:90},
-    {position:{x:10000,y:0},speed:0,directionDeg:0}
+    {position:{x:8900,y:0},speed:1000,directionDeg:90},
+    {position:{x:8900,y:0},speed:0,directionDeg:0}
   ]){
     const s=P.createState(launch(options)),fine=reference(s,1/3840,1);run(s,240);
     if(s.status==='captured')assert.ok(Math.abs(s.elapsedSeconds-fine.elapsedSeconds)<0.002);

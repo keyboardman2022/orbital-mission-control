@@ -47,6 +47,10 @@ class Engine{
         // Keep all committed coordinates/times; extend tracking only for live records.
         if(!r.state.continuousTracking){r.state.continuousTracking=true;this.dirty.add(r.id);}
         this.records.set(r.id,r);
+        if(Math.hypot(r.state.x,r.state.y)>M.MODEL.observation.radius){
+          r.state.event={type:'out_of_observable',substepFraction:0,x:r.state.x,y:r.state.y,elapsedSeconds:r.state.elapsedSeconds};
+          this.finish(r,'out_of_observable');continue;
+        }
         if(r.status==='active')this.ensureSampler(r);
       }
     }

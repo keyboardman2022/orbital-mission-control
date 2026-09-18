@@ -6,6 +6,43 @@ const {join}=require('node:path');
 const {Engine}=require('../server/engine.js');
 const launch={name:'Voyager',position:{x:330,y:0},massKg:1000,speed:97.31236802019037,directionDeg:90,modelVersion:'pw-2d-v1',idempotencyKey:'test-request-0001'};
 function fixture(t){const dir=mkdtempSync(join(tmpdir(),'orbital-engine-')),engines=[];t.after(()=>{for(const e of engines)e.close();rmSync(dir,{recursive:true,force:true});});let now=100000;const file=join(dir,'test.sqlite');const make=()=>{const e=new Engine({filename:file,now:()=>now});engines.push(e);return e;};return {file,make,setNow:n=>now=n};}
+
+test('observable boundary is the fixed shockwave distance after sixty seconds',()=>{
+ const M=require('../shared/simulation.js'),S=require('../shared/map-sweep.js');
+ const wave=S.create({ids:[],origin:{x:0,y:0},extent:10000});wave.advance(60);
+ assert.equal(M.MODEL.observation.radius,wave.radius);
+ assert.equal(M.MODEL.observation.radius,9000);
+ assert.throws(()=>M.validateLaunch({...launch,position:{x:9001,y:0}}),{status:422});
+});
+
+test('outward boundary crossing freezes at the boundary and retains terminal trajectory and export',t=>{
+ const f=fixture(t),e=f.make(),u=e.guest().user.id;
+ const p=e.launch(u,{...launch,position:{x:8999.9,y:0},speed:200,directionDeg:0,idempotencyKey:'observable-exit'});
+ e.advanceTo(10);e.checkpoint();const end=e.get(u,p.id);
+ assert.equal(end.status,'out_of_observable');assert.equal(end.endReason,'out_of_observable');
+ assert.ok(Math.abs(Math.hypot(end.state.x,end.state.y)-9000)<1e-8);
+ assert.ok(end.state.elapsedSeconds>0&&end.state.elapsedSeconds<1/240);
+ assert.equal(e.active(u).satellites.length,0);
+ const points=e.trajectory(u,p.id,{limit:1000}).points;
+ assert.equal(points[0].kind,'birth');assert.equal(points.at(-1).kind,'out_of_observable');
+ const events=e.db.prepare('SELECT event FROM events WHERE satellite_id=? ORDER BY seq').all(p.id).map(r=>JSON.parse(r.event));
+ assert.equal(events.at(-1).type,'out_of_observable');
+ assert.equal(e.prepareExport(u,p.id,'json').satellite.endReason,'out_of_observable');
+ e.advanceTo(100);e.checkpoint();assert.deepEqual(e.get(u,p.id).state,end.state);
+ e.close();assert.deepEqual(f.make().get(u,p.id).state,end.state);
+});
+
+test('restart archives already distant live satellites without rewriting existing history',t=>{
+ const f=fixture(t),e=f.make(),u=e.guest().user.id,p=e.launch(u,launch);
+ const r=e.records.get(p.id);r.state.x=9500;r.state.vx=100;r.state.tick=240;r.state.elapsedSeconds=1;e.dirty.add(p.id);e.checkpoint();
+ const before=e.trajectory(u,p.id,{limit:1000}).points;e.close();
+ const restored=f.make(),end=restored.get(u,p.id);
+ assert.equal(end.status,'out_of_observable');assert.equal(restored.active(u).satellites.length,0);
+ assert.equal(end.state.x,9500);assert.equal(end.state.elapsedSeconds,1);
+ const after=restored.trajectory(u,p.id,{limit:1000}).points;
+ assert.deepEqual(after.slice(0,before.length),before);assert.equal(after.at(-1).kind,'out_of_observable');
+ restored.close();const again=f.make();assert.equal(again.trajectory(u,p.id,{limit:1000}).points.length,after.length);
+});
 test('launch is owned, durable and idempotent; conflicting retry is rejected',t=>{
  const f=fixture(t),e=f.make();t.after(()=>e.close());const a=e.guest(),b=e.guest();
  const p=e.launch(a.user.id,launch),again=e.launch(a.user.id,launch);
@@ -46,7 +83,7 @@ test('a durable launch also commits the world clock and pre-existing satellite s
 test('formal tracking continues beyond former escape boundary and persists velocity telemetry',t=>{
  const f=fixture(t),e=f.make(),u=e.guest().user.id;
  const p=e.launch(u,{...launch,position:{x:600,y:0},speed:200,directionDeg:0,idempotencyKey:'unbounded-escape'});
- e.advanceTo(12000);e.checkpoint();const s=e.get(u,p.id);
+ e.advanceTo(6000);e.checkpoint();const s=e.get(u,p.id);
  assert.equal(s.status,'active');assert.ok(s.state.x>1800);
  assert.equal(s.telemetry.speed,Math.hypot(s.state.vx,s.state.vy));
  assert.ok(s.telemetry.speed<p.telemetry.speed);

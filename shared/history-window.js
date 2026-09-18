@@ -49,7 +49,7 @@
     return {
       get state(){return state;},
       accept(incoming,{recovering=false}={}){
-        if(state&&recovering&&!['terminated','error'].includes(incoming.status))return false;
+        if(state&&recovering&&!['terminated','out_of_observable','error'].includes(incoming.status))return false;
         if(state&&incoming.status==='active'&&Math.abs(incoming.tick-state.tick)<=model.MODEL.tickRate*2){
           const earlier=copy(incoming.tick<state.tick?incoming:state),later=incoming.tick<state.tick?state:incoming;
           while(earlier.tick<later.tick&&earlier.status==='active')model.step(earlier);

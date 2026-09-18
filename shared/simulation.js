@@ -6,13 +6,15 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (units) {
   'use strict';
   // Paczynski–Wiita test particles; scene units, not relativistic geodesics.
+  const sweepSpeed=150,sweepSeconds=60,observationRadius=sweepSpeed*sweepSeconds;
   const MODEL = Object.freeze({
     version: 'pw-2d-v1', mu: 2000000, rs: 66, captureRadius: 69.3,
     tickRate: 240, step: 1 / 240,
     dynamics: Object.freeze({version:'two-body-pw-v1',maxMassKg:1e30,centralMassKg:units.centralMassKg,
       referenceFrame:'satellite position and velocity relative to its independent black hole',
       approximation:'finite-mass extension of PW pair potential; not GR, no satellite-satellite forces'}),
-    limits: Object.freeze({ maxRadius: 1e9, maxSpeed: 1000, maxMassKg: 1e12, minRadius: 80 }),
+    observation:Object.freeze({version:'sweep-60s-v1',sweepSpeed,sweepSeconds,radius:observationRadius,endReason:'out_of_observable'}),
+    limits: Object.freeze({ maxRadius: observationRadius, maxSpeed: 1000, maxMassKg: 1e12, minRadius: 80 }),
     calibration: units?.SCALE,
     units: Object.freeze({ length: 'scene length', time: 'simulation second', mass: 'kg', speed: 'scene length / simulation second', angle: 'degrees; +X = 0, counterclockwise; +Y up' })
   });
@@ -95,6 +97,7 @@
     if (![s.x, s.y, s.vx, s.vy, s.escapeRadius, energy(s)].every(Number.isFinite) || !Number.isSafeInteger(oldTick) || oldTick < 0 || oldTick >= Number.MAX_SAFE_INTEGER) {
       return finish(s, 'error', 0, Number.isSafeInteger(oldTick) && oldTick >= 0 ? oldTick : 0);
     }
+    if(Math.hypot(s.x,s.y)>MODEL.observation.radius)return finish(s,'out_of_observable',0,oldTick);
     const dt = MODEL.step,mu=s.gravitationalMu??MODEL.mu, a = acceleration(s.x, s.y,mu);
     const hx = s.vx + a.x * dt / 2, hy = s.vy + a.y * dt / 2;
     const nx = s.x + hx * dt, ny = s.y + hy * dt;
@@ -111,6 +114,12 @@
     const b = acceleration(nx, ny,mu), vx = hx + b.x * dt / 2, vy = hy + b.y * dt / 2;
     const next = { x: nx, y: ny, vx, vy,...(s.gravitationalMu!==undefined?{gravitationalMu:mu}:{}) };
     if (![vx, vy, energy(next)].every(Number.isFinite)) return finish(s, 'error', 0, oldTick);
+    if(Math.hypot(nx,ny)>MODEL.observation.radius){
+      const fraction=crossing(s.x,s.y,nx,ny,MODEL.observation.radius,true)??1;
+      const x=s.x+(nx-s.x)*fraction,y=s.y+(ny-s.y)*fraction,boundaryAcceleration=acceleration(x,y,mu),h=dt*fraction;
+      Object.assign(s,{x,y,vx:s.vx+(a.x+boundaryAcceleration.x)*h/2,vy:s.vy+(a.y+boundaryAcceleration.y)*h/2});
+      return finish(s,'out_of_observable',fraction,oldTick);
+    }
     if (!s.continuousTracking && Math.hypot(nx, ny) >= s.escapeRadius && nx * vx + ny * vy > 0 && energy(next) > 0) {
       const fraction = crossing(s.x, s.y, nx, ny, s.escapeRadius, true) ?? 1;
       Object.assign(s, { x: s.x + (nx - s.x) * fraction, y: s.y + (ny - s.y) * fraction,
