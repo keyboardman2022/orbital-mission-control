@@ -20,10 +20,14 @@ test('satellite and trail do not add brightness; unresolved far objects produce 
  assert.ok(ctx.strokes.every(s=>s.blend==='source-over'&&s.width<.8&&s.opacity<.1));
  const count=ctx.strokes.length;V.renderTrail(ctx,points,project,3,1e-7);assert.equal(ctx.strokes.length,count);
 });
-test('map impact expands in screen pixels and remains visible at any world zoom',()=>{
+test('map impact uses camera projection so zooming out shrinks its radius and thickness',()=>{
  const ctx=context(),arcs=[];ctx.arc=(x,y,r)=>arcs.push({x,y,r});ctx.fill=()=>{};
+ const transforms=[];ctx.translate=()=>{};ctx.rotate=()=>{};ctx.scale=(x,y)=>transforms.push({x,y});
  const wave=require('../shared/map-sweep.js').create({ids:[],origin:{x:250,y:200},width:1000,height:800});wave.flares=[];wave.advance(1.2);
- V.renderMapImpact(ctx,wave);
+ V.renderMapImpact(ctx,wave,{cx:500,cy:400,scale:1});
  assert.ok(arcs.some(a=>a.x===250&&a.y===200&&Math.abs(a.r-wave.radius)<1e-9));
  assert.ok(ctx.strokes.some(s=>s.opacity>0&&s.width>=1));
+ const radius=arcs[0].r;V.renderMapImpact(ctx,wave,{cx:500,cy:400,scale:.1});
+ assert.equal(transforms[0].x,1);assert.equal(transforms[1].x,.1);assert.equal(arcs[0].r,radius);
+ assert.equal(transforms[1].y,.066);
 });

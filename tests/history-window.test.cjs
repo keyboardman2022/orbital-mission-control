@@ -199,17 +199,17 @@ test('mission continues moving after reaching the latest packet endpoint',async(
 test('map sweep progressively removes satellites, terminates them and rejects late active display patches',async()=>{
   const h=await missionHarness('active');await h.node('sweepAll').onclick();
   h.frames[0](10);assert.equal(h.sweepRequests.length,0);
-  for(let i=1;i<=30;i++){h.frames[i](i*100);await h.flush();}
+  for(let i=1;i<=90;i++){h.frames[i](i*100);await h.flush();}
   assert.deepEqual(h.sweepRequests.flatMap(r=>r.ids),['one']);
   const rendered=h.liveRenders.length;
   h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{...h.satellite}],server:{tick:3}})});
-  h.frames[31](3100);assert.equal(h.liveRenders.length,rendered);
+  h.frames[91](9100);assert.equal(h.liveRenders.length,rendered);
   assert.equal(h.node('sweepAll').disabled,false);
 });
 test('an empty map still plays the wave and finishes without attempting to terminate historical satellites',async()=>{
   const h=await missionHarness('terminated');await h.node('sweepAll').onclick();
   assert.equal(h.node('sweepAll').disabled,true);
-  for(let i=0;i<=31;i++)h.frames[i](i*100);
+  for(let i=0;i<=90;i++)h.frames[i](i*100);
   assert.equal(h.sweepRequests.length,0);assert.equal(h.node('sweepAll').disabled,false);
   assert.ok(h.node('notice').textContent.includes('已清除 0'));
 });

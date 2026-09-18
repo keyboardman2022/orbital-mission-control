@@ -183,7 +183,7 @@
       if(position&&['active','escaped'].includes(s.status))drawSatellite(position,s.name+(s.status==='escaped'?' / 最后位置':''),id===selectedId,s.massKg);ctx.restore();
     }}
     if(!hiddenLive)for(const wave of impactWaves)visuals.impact(ctx,holeView(),visualTime-wave.born,wave.mass,wave.angle);
-    if(mapWave)visuals.mapImpact(ctx,mapWave);
+    if(mapWave)visuals.mapImpact(ctx,mapWave,view);
     if(historyMode&&historyPoints.length){const last=historyPoints.at(-1);
       if(last.kind==='captured'&&replayElapsed>=last.elapsedSeconds-1e-9&&!replayCaptureShown){replayCaptureShown=true;impactWaves.push({born:visualTime,mass:visualMass(satellites.get(selectedId)?.massKg||1000),angle:Math.atan2(-last.y,last.x)});}
       if(replayElapsed<last.elapsedSeconds-1e-9)replayCaptureShown=false;
@@ -262,9 +262,10 @@
   function finishSweep(){if(mapWave?.done&&!sweepPending.size&&!sweepSending){const count=mapWave.total,failed=mapWave.failures;mapWave=null;sweepBusy=false;$('sweepAll').textContent='全图冲击波';$('viewMode').textContent=recovering?'服务器补算中 · 连续物理预演':'实时观察';updateLaunch();message(`冲击波已扫过全图 · 已清除 ${count-failed} 颗卫星，历史轨迹仍可回放与导出。${failed?` ${failed} 颗清除失败，已恢复显示，可重新尝试。`:''}`);}}
   function advanceSweep(seconds){
     if(!mapWave)return;mapWave.advance(seconds);
-    const positions=new Map();for(const id of mapWave.remaining){const p=observedPosition(id);if(p)positions.set(id,project(p.x,p.y));}
+    $('viewMode').textContent='全图冲击波 · 半径 '+units.formatKm(units.toKm(mapWave.radius));
+    const positions=new Map();for(const id of mapWave.remaining){const s=satellites.get(id),p=observedPosition(id)||s?.state;if(p)positions.set(id,{x:p.x,y:p.y});}
     for(const id of mapWave.hits(positions)){
-      const p=positions.get(id);if(p)mapWave.flares.push({...p,born:mapWave.age});
+      const p=positions.get(id);if(p)mapWave.flares.push({x:p.x,y:-p.y,born:mapWave.age});
       sweptIds.add(id);sweepPending.add(id);displayStates.delete(id);liveObservers.delete(id);trails.delete(id);
     }
     mapWave.flares=mapWave.flares.filter(f=>mapWave.age-f.born<.5).slice(-100);
@@ -277,8 +278,7 @@
       const targets=(data.satellites||[]).filter(s=>['active','queued'].includes(s.status));
       clearHistory();historyMode=false;playing=false;hiddenLive=false;paused=false;$('pause').textContent='暂停观察';$('replay').hidden=true;
       for(const s of targets)satellites.set(s.id,s);
-      const origin={x:Math.max(18,Math.min(width-18,view.cx)),y:Math.max(18,Math.min(height-18,view.cy))};
-      mapWave=OrbitalSweep.create({ids:targets.map(s=>s.id),origin,width,height});mapWave.flares=[];mapWave.total=targets.length;mapWave.failures=0;
+      mapWave=OrbitalSweep.create({ids:targets.map(s=>s.id),origin:{x:0,y:0}});mapWave.flares=[];mapWave.total=targets.length;mapWave.failures=0;
       $('sweepAll').textContent='冲击波扩散中…';$('viewMode').textContent='全图冲击波';message('冲击波正在扩散，扫过的卫星将终止运行；已有轨迹保留。');
     }catch(e){if(epoch===sweepEpoch){sweepBusy=false;$('sweepAll').textContent='全图冲击波';updateLaunch();message(e.message);}}
   };

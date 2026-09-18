@@ -151,9 +151,10 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
     }
     return {blackhole,trail:renderTrail,satellite:renderSatellite,impact,mapImpact:renderMapImpact};
   }
-  function renderMapImpact(ctx,wave){
+  function renderMapImpact(ctx,wave,view){
     const {x,y}=wave.origin,r=Math.max(1,wave.radius),fade=Math.max(0,1-Math.max(0,wave.age-wave.duration)/.6);
-    ctx.save();ctx.globalCompositeOperation='source-over';ctx.globalAlpha=fade;
+    const visibility=Math.min(1,(view.scale/.03)**2);if(visibility<.001)return;
+    ctx.save();ctx.translate(view.cx,view.cy);ctx.rotate(-.48);ctx.scale(view.scale,view.scale*.66);ctx.globalCompositeOperation='source-over';ctx.globalAlpha=fade*visibility;
     const halo=ctx.createRadialGradient(x,y,Math.max(0,r-45),x,y,r+20);
     halo.addColorStop(0,'rgba(164,219,166,0)');halo.addColorStop(.55,'rgba(164,255,194,.12)');halo.addColorStop(.75,'rgba(220,255,235,.26)');halo.addColorStop(1,'rgba(164,219,166,0)');
     ctx.fillStyle=halo;ctx.fillRect(x-r-20,y-r-20,(r+20)*2,(r+20)*2);

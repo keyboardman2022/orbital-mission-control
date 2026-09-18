@@ -7,8 +7,12 @@ test('map wave clears near satellites first, covers screen corners and finally i
   const wave=require('../shared/map-sweep.js').create({ids:['near','far','offscreen'],origin:{x:100,y:100},width:800,height:600});
   wave.advance(.1);assert.deepEqual(wave.hits(new Map([['near',{x:110,y:100}],['far',{x:800,y:600}],['offscreen',{x:1e9,y:1e9}]])),['near']);
   wave.advance(1);assert.deepEqual(wave.hits(new Map([['far',{x:800,y:600}]])),[]);
-  wave.advance(2);assert.deepEqual(wave.hits(new Map([['far',{x:800,y:600}],['offscreen',{x:1e9,y:1e9}]])),['far','offscreen']);
+  wave.advance(8);assert.deepEqual(wave.hits(new Map([['far',{x:800,y:600}],['offscreen',{x:1e9,y:1e9}]])),['far','offscreen']);
   assert.ok(wave.radius>=Math.hypot(700,500));assert.equal(wave.remaining.size,0);
+});
+test('wave expansion is slower and its world distance does not depend on viewport size',()=>{
+  const S=require('../shared/map-sweep.js'),a=S.create({ids:[],origin:{x:0,y:0},width:800,height:600}),b=S.create({ids:[],origin:{x:0,y:0},width:8000,height:6000});
+  a.advance(2);b.advance(2);assert.equal(a.radius,b.radius);assert.ok(a.radius<400);assert.ok(a.duration>=8);
 });
 test('map sweep discovers all owned live satellites and batch termination preserves their history',t=>{
   const dir=mkdtempSync(join(tmpdir(),'orbital-sweep-')),e=new Engine({filename:join(dir,'orbital.sqlite'),now:()=>1000});
