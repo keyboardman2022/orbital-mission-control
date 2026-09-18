@@ -162,14 +162,16 @@ test('mission draws a physical arc and its trail between sparse live packets',as
   assert.ok(h.liveTrails.at(-1).length>10);
 });
 
-test('mission freezes observation during recovery instead of drawing accelerated jumps',async()=>{
+test('mission keeps observation moving during recovery and displays the observed velocity',async()=>{
   const h=await missionHarness('active');h.frames[0](10);const before=h.liveRenders.at(-1);
   h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{id:'one',state:{...h.satellite.state,tick:250000,x:-500},status:'active'}],server:{tick:2,status:'recovering',lagSeconds:1000}})});
-  h.frames[1](110);assert.equal(h.liveRenders.at(-1).x,before.x);
+  h.frames[1](110);assert.ok(Math.hypot(h.liveRenders.at(-1).x-before.x,h.liveRenders.at(-1).y-before.y)>.01);
   assert.ok(h.node('viewMode').textContent.includes('补算'));
+  assert.ok(!h.node('viewMode').textContent.includes('固定'));
+  const units=require('../shared/units.js');assert.ok(h.node('detailSpeed').textContent.includes(units.formatSpeed(h.liveRenders.at(-1))));
   h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[],server:{tick:3,status:'running',lagSeconds:0}})});
-  h.frames[2](210);assert.equal(h.liveRenders.at(-1).x,-500);
-  assert.equal(h.liveTrails.at(-1).length,1);
+  h.frames[2](210);assert.ok(Math.abs(h.liveRenders.at(-1).x+500)<1);
+  assert.ok(h.liveTrails.at(-1).every(p=>p.x<0));
 });
 
 test('a new live packet starts from the position currently on screen without jumping ahead',async()=>{
@@ -180,7 +182,17 @@ test('a new live packet starts from the position currently on screen without jum
   send();for(let i=0;i<48;i++)M.step(state);send();h.frames[0](100);const before=h.liveRenders.at(-1);
   for(let i=0;i<48;i++)M.step(state);send();h.frames[1](100);
   assert.ok(Math.hypot(h.liveRenders.at(-1).x-before.x,h.liveRenders.at(-1).y-before.y)<1e-9);
-  h.frames[2](300);assert.ok(Math.hypot(h.liveRenders.at(-1).x-state.x,h.liveRenders.at(-1).y-state.y)<1e-9);
+  h.frames[2](300);assert.ok(Math.abs(h.liveRenders.at(-1).elapsedSeconds-(240010/240+.3))<1e-9);
+});
+
+test('mission continues moving after reaching the latest packet endpoint',async()=>{
+  const M=require('../shared/simulation.js'),h=await missionHarness('active');
+  const state=M.createState({name:'continuous',position:{x:220,y:0},massKg:1000,speed:M.circularSpeed(220),directionDeg:90},{continuousTracking:true});
+  state.tick=240010;state.elapsedSeconds=state.tick/240;
+  const send=()=>h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{id:'one',state:{...state},status:'active'}],server:{tick:2}})});
+  send();for(let i=0;i<48;i++)M.step(state);send();h.frames[0](200);const before=h.liveRenders.at(-1);
+  h.frames[1](350);assert.ok(Math.hypot(h.liveRenders.at(-1).x-before.x,h.liveRenders.at(-1).y-before.y)>15);
+  assert.ok(Math.abs(Math.hypot(h.liveRenders.at(-1).x,h.liveRenders.at(-1).y)-220)<.01);
 });
 
 test('mission pins the first page cutoff before an interrupted initial window finishes loading',async()=>{

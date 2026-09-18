@@ -5,7 +5,7 @@
   const statusText = {queued:'排队中',active:'运行中',captured:'已捕获',escaped:'已逃逸',terminated:'已终止',error:'计算中断'};
   const canvas=$('universe'),ctx=canvas.getContext('2d'),visuals=OrbitalVisuals.create();
   const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
-  let visualTime=0,liveTime=0,recovering=false,impactWaves=[],seenCaptures=new Set(),replayCaptureShown=false;
+  let visualTime=0,liveTime=0,recovering=false,lastTelemetryTime=-1,impactWaves=[],seenCaptures=new Set(),replayCaptureShown=false;
   const visualMass=mass=>Math.max(1,Math.min(3,1+Math.log10(Math.max(1,mass)/1000+1)*.6));
   const MIN_ZOOM=1e-7,MAX_ZOOM=2;
   let width=0,height=0,zoom=1.2,view,draft=null,draftVisible=true,invalidCapture=false,preview=[],previewToken=0,previewTimer;
@@ -13,7 +13,7 @@
   let mapDrag=null,suppressMapClick=false,mapTool='pick',tracking=false;
   const holeMarker=$('blackHoleMarker'),holeIcon=holeMarker.querySelector('.origin-icon'),holeLabel=holeMarker.querySelector('.origin-label');
   let csrf='',online=false,sessionReady=false,stream=null,streamEpoch=0,connecting=false,identityEpoch=0,selectionEpoch=0,selectedId=null;
-  let satellites=new Map(),trails=new Map(),displayStates=new Map(),displayTransitions=new Map(),hiddenLive=false,paused=false,nextCursor=null;
+  let satellites=new Map(),trails=new Map(),displayStates=new Map(),liveObservers=new Map(),hiddenLive=false,paused=false,nextCursor=null;
   let historyPoints=[],historyMode=false,playing=false,replayElapsed=0,lastFrame=performance.now(),recoveryKey='',pendingLaunch=null,launchBusy=false;
   const history=OrbitalHistory,historyCache=history.createCache();
   let historySnapshot=null,historyCutoffSeq,historyVersion=0,historyController=null,historyLoading=false,historyResume=false;
@@ -131,10 +131,7 @@
   $('follow').addEventListener('change',()=>{if($('follow').checked)setTracking(false);});
   function observedPosition(id){
     const s=displayStates.get(id)||satellites.get(id);if(!s?.state)return null;
-    const transition=displayTransitions.get(id);
-    if(!transition||s.status!=='active'||reducedMotion.matches)return s.state;
-    const fraction=Math.min(1,Math.max(0,(liveTime-transition.born)/transition.duration));
-    return history.interpolate(transition.points,transition.fromTime+(s.state.elapsedSeconds-transition.fromTime)*fraction)||s.state;
+    return {...(liveObservers.get(id)?.state||s.state)};
   }
   function updateHoleMarker(){
     const marker=OrbitalCamera.originMarker(view,width,height);
@@ -193,7 +190,7 @@
       if(!invalidCapture&&raw.speed>0){const a=(((raw.directionDeg%360)+360)%360)*Math.PI/180,v=project(p.x+Math.cos(a),p.y+Math.sin(a)),dx=v.x-q.x,dy=v.y-q.y,len=Math.hypot(dx,dy),ux=dx/len,uy=dy/len,ex=q.x+ux*55,ey=q.y+uy*55;ctx.save();ctx.globalAlpha=.7;ctx.setLineDash([3,4]);ctx.beginPath();ctx.moveTo(q.x,q.y);ctx.lineTo(ex,ey);ctx.stroke();ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(ex-ux*8-uy*4,ey-uy*8+ux*4);ctx.lineTo(ex,ey);ctx.lineTo(ex-ux*8+uy*4,ey-uy*8-ux*4);ctx.stroke();ctx.restore();ctx.fillText(`${((raw.directionDeg%360)+360)%360}° · ${raw.speed.toLocaleString()} km/s`,Math.max(8,Math.min(width-140,ex+10)),ey+16);}else if(!invalidCapture)ctx.fillText('静止释放',labelX,labelY+32);
     }
     $('offscreen').hidden=!off;$('coordinateReadout').textContent='WORLD / km · +Y UP';
-    const selected=displayStates.get(selectedId)||satellites.get(selectedId),state=historyMode?replayPoint(replayElapsed):selected?.state;
+    const selected=displayStates.get(selectedId)||satellites.get(selectedId),state=historyMode?replayPoint(replayElapsed):observedPosition(selectedId);
     $('telemetryHud').hidden=!state||hiddenLive;
     if(state&&!hiddenLive){const t=units.telemetry(state,selected?.calibration||scale);$('telemetryHud').textContent=`${tracking?'跟踪 / ':''}${selected?.name||'卫星'} · ${units.formatSpeed(state,selected?.calibration||scale)} · 距中心 ${units.formatKm(t.radiusKm)}`;
       const q=project(state.x,state.y);if(q.x<15||q.x>width-15||q.y<140||q.y>height-110){const x=Math.max(18,Math.min(width-18,q.x)),y=Math.max(150,Math.min(height-165,q.y));ctx.save();ctx.translate(x,y);ctx.rotate(Math.atan2(q.y-y,q.x-x));ctx.fillStyle='#a4dba6';ctx.beginPath();ctx.moveTo(7,0);ctx.lineTo(-5,-5);ctx.lineTo(-5,5);ctx.closePath();ctx.fill();ctx.restore();}}
@@ -242,38 +239,40 @@
     }catch(e){if(current()){playing=false;historyResume=false;$('play').textContent='播放';$('historyMessage').textContent=e.message;}return false;}
     finally{if(current()){historyLoading=false;$('history').disabled=false;}}
   }
-  function frame(now){const elapsed=Math.max(0,(now-lastFrame)/1000),dt=Math.min(elapsed,.1);lastFrame=now;if(!paused)liveTime+=elapsed;if(!paused&&!document.hidden&&!reducedMotion.matches)visualTime+=dt*.3;impactWaves=impactWaves.filter(w=>visualTime-w.born<2.4);if(historyMode&&playing&&!historyLoading){const next=Math.min(Number($('timeline').max),replayElapsed+dt*number('rate'));if(!cachedHistory(next))requestHistory(next,true);else{replayElapsed=next;$('timeline').value=replayElapsed;if(replayElapsed>=Number($('timeline').max)){playing=false;$('play').textContent='播放';}updateReplayLabel();}}draw();requestAnimationFrame(frame);}requestAnimationFrame(frame);
+  function advanceLive(seconds){
+    for(const [id,observer]of liveObservers){
+      const points=observer.advance(seconds);if(!points.length)continue;
+      trails.set(id,[...(trails.get(id)||[]),...points].slice(-1440));
+      const s=displayStates.get(id);if(!s)continue;
+      const shown={...s,state:{...observer.state},status:observer.state.status};displayStates.set(id,shown);
+      if(shown.status==='captured'&&s.status==='active'&&!historyMode)captureVisual(shown);
+    }
+  }
+  function frame(now){const elapsed=Math.max(0,(now-lastFrame)/1000),dt=Math.min(elapsed,.1);lastFrame=now;if(!paused){liveTime+=elapsed;if(!document.hidden)advanceLive(elapsed);}if(!paused&&!document.hidden&&!reducedMotion.matches)visualTime+=dt*.3;impactWaves=impactWaves.filter(w=>visualTime-w.born<2.4);if(historyMode&&playing&&!historyLoading){const next=Math.min(Number($('timeline').max),replayElapsed+dt*number('rate'));if(!cachedHistory(next))requestHistory(next,true);else{replayElapsed=next;$('timeline').value=replayElapsed;if(replayElapsed>=Number($('timeline').max)){playing=false;$('play').textContent='播放';}updateReplayLabel();}}if(liveTime-lastTelemetryTime>=.1){renderList();renderDetail();lastTelemetryTime=liveTime;}draw();requestAnimationFrame(frame);}requestAnimationFrame(frame);
   async function api(path,options={}){if(options.method==='POST'&&options.body===undefined)options={...options,body:'{}'};const response=await fetch(path,{credentials:'same-origin',...options,headers:{...(options.body?{'Content-Type':'application/json'}:{}),...(options.method&&options.method!=='GET'?{'X-CSRF-Token':csrf}:{}),...options.headers}});let data;try{data=await response.json();}catch{throw new Error('服务返回了无法识别的数据，请确认通过 Node 服务打开页面。');}if(!response.ok){const e=new Error(data.error?.message||`请求失败 (${response.status})`);e.status=response.status;e.code=data.error?.code;throw e;}return data;}
-  function resetLiveDrawing(){displayTransitions.clear();trails.clear();displayStates.clear();for(const s of Array.from(satellites.values()).slice(-100)){displayStates.set(s.id,s);if(s.state)trails.set(s.id,[s.state]);}const selected=satellites.get(selectedId);if(selected){displayStates.set(selected.id,selected);if(selected.state)trails.set(selected.id,[selected.state]);}}
+  function setLiveRecord(s){
+    let observer=liveObservers.get(s.id);if(!observer){observer=history.createLiveObserver(model);liveObservers.set(s.id,observer);}
+    if(s.state){const reset=observer.accept({...s.state,status:s.status},{recovering});if(reset)trails.set(s.id,[{...observer.state}]);}
+    displayStates.set(s.id,{...s,...(observer.state?{state:{...observer.state},status:observer.state.status}:{})});
+  }
+  function resetLiveDrawing(){liveObservers.clear();trails.clear();displayStates.clear();for(const s of Array.from(satellites.values()).slice(-100))setLiveRecord(s);const selected=satellites.get(selectedId);if(selected)setLiveRecord(selected);}
   function serverStatus(server){
     if(Number.isFinite(server?.tick)){if(server.tick<lastServerTick)return false;lastServerTick=server.tick;}
     online=true;const lag=Number(server?.lagSeconds||0),nextRecovering=server?.status==='recovering'||lag>2;
-    if(nextRecovering&&!recovering){for(const [id,s]of displayStates){const position=observedPosition(id);if(position)displayStates.set(id,{...s,state:{...s.state,...position}});}displayTransitions.clear();}
     if(recovering&&!nextRecovering&&!paused)resetLiveDrawing();recovering=nextRecovering;
-    if(!historyMode&&!paused&&!hiddenLive)$('viewMode').textContent=recovering?'服务器补算中 · 画面暂时固定':'实时观察';
+    if(!historyMode&&!paused&&!hiddenLive)$('viewMode').textContent=recovering?'服务器补算中 · 连续物理预演':'实时观察';
     $('connection').textContent=recovering?`服务已连接 · 正在补算离线轨迹 · 剩余 ${lag.toFixed(1)} 模拟秒`:`服务已连接 · ${server?.status||'running'}${lag>.2?' · 落后 '+lag.toFixed(1)+' 秒':''}`;updateLaunch();
   }
   function revealKey(key){recoveryKey=key||'';$('recoveryKey').textContent=recoveryKey;$('recoveryNotice').hidden=!recoveryKey;}
   function saveText(text,name,type='text/plain'){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   $('copyKey').onclick=async()=>{try{await navigator.clipboard.writeText(recoveryKey);message('恢复密钥已复制，请保存在安全位置。');}catch{message('无法访问剪贴板，请使用下载密钥。');}};
   $('downloadKey').onclick=()=>saveText('ORBITAL 恢复密钥\n'+recoveryKey+'\n请私密保存。持有密钥可访问和控制此档案的卫星。','orbital-recovery-key.txt');$('dismissKey').onclick=()=>revealKey('');
-  function resetIdentity(){clearHistory();setTracking(false);currentUserId=null;impactWaves=[];seenCaptures.clear();lastServerTick=-1;paused=false;hiddenLive=false;$('pause').textContent='暂停观察';$('viewMode').textContent='实时观察';identityEpoch++;selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);stream?.close();stream=null;satellites.clear();trails.clear();displayStates.clear();displayTransitions.clear();selectedId=null;historyPoints=[];historyMode=false;playing=false;pendingLaunch=null;nextCursor=null;sessionReady=false;csrf='';revealKey('');$('detail').hidden=true;$('loadMore').hidden=true;$('replay').hidden=true;renderList();}
+  function resetIdentity(){clearHistory();setTracking(false);currentUserId=null;impactWaves=[];seenCaptures.clear();lastServerTick=-1;paused=false;hiddenLive=false;$('pause').textContent='暂停观察';$('viewMode').textContent='实时观察';identityEpoch++;selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);stream?.close();stream=null;satellites.clear();trails.clear();displayStates.clear();liveObservers.clear();selectedId=null;historyPoints=[];historyMode=false;playing=false;pendingLaunch=null;nextCursor=null;sessionReady=false;csrf='';revealKey('');$('detail').hidden=true;$('loadMore').hidden=true;$('replay').hidden=true;renderList();}
   async function connect(){if(connecting||identityBusy)return;connecting=true;identityLock(true);let epoch=identityEpoch;online=false;updateLaunch();$('connection').textContent='正在连接计算服务…';try{const session=await api('/api/session/guest',{method:'POST'});if(epoch!==identityEpoch)return;if(currentUserId&&currentUserId!==session.user.id){resetIdentity();epoch=identityEpoch;}currentUserId=session.user.id;csrf=session.csrfToken;sessionReady=true;$('identityLabel').textContent='档案 '+session.user.id;if(session.recoveryKey)revealKey(session.recoveryKey);const config=await api('/api/model');if(epoch!==identityEpoch)return;if((config.model.version||config.model.modelVersion)!==model.MODEL.version||config.model.calibration?.version!==scale.version||config.model.dynamics?.version!==model.MODEL.dynamics.version)throw new Error('浏览器模型或物理标定与服务器版本不一致，请刷新页面。');$('modelVersion').textContent=model.MODEL.dynamics.version;serverStatus(config.server);await loadList(false);if(epoch!==identityEpoch)return;openStream();}catch(e){online=false;$('connection').textContent='服务离线';message(e.message+' 请启动项目的 Node 服务后点击“重新连接”。');}finally{connecting=false;identityLock(false);updateLaunch();}}
   function openStream(){stream?.close();stream=new EventSource('/api/stream'+(selectedId?'?satelliteId='+encodeURIComponent(selectedId):''));const epoch=identityEpoch,subscription=++streamEpoch;stream.addEventListener('snapshot',event=>{if(epoch!==identityEpoch||subscription!==streamEpoch)return;try{const data=JSON.parse(event.data);if(serverStatus(data.server)===false)return;ingest(data.satellites||[]); }catch{message('实时快照无效，请重新连接。');}});stream.onerror=()=>{if(epoch!==identityEpoch||subscription!==streamEpoch)return;online=false;$('connection').textContent='实时连接中断 · 自动重连中';updateLaunch();};}
   function ingest(items){for(const incoming of items){const old=satellites.get(incoming.id),s=history.mergeSnapshot(old,incoming);if(!s)continue;const incomingTick=s.state?.tick??-1,oldTick=old?.state?.tick??-1;if(old&&(incomingTick<oldTick||(incomingTick===oldTick&&!['active','queued'].includes(old.status)&&['active','queued'].includes(s.status))))continue;if(s.status==='captured'&&old&&old.status==='active'&&!paused&&!historyMode&&!recovering)captureVisual(s);
-      satellites.set(s.id,s);if(!paused&&(!recovering||!displayStates.has(s.id))){
-        const shown=displayStates.get(s.id),position=observedPosition(s.id);
-        if(shown?.state&&s.state&&shown.state.tick!==s.state.tick){
-          const segment=s.status==='active'?history.liveSegment(shown.state,s.state,model):null;
-          if(segment){
-            const previous=displayTransitions.get(s.id),points=(previous?[...previous.points.filter(p=>p.elapsedSeconds<segment[0].elapsedSeconds),...segment]:segment).slice(-1441);
-            const fromTime=Math.max(points[0].elapsedSeconds,position?.elapsedSeconds??points[0].elapsedSeconds);
-            displayTransitions.set(s.id,{points:points.filter((p,i)=>p.elapsedSeconds>=fromTime||points[i+1]?.elapsedSeconds>fromTime),fromTime,born:liveTime,duration:s.id===selectedId?.2:1});
-            trails.set(s.id,[...(trails.get(s.id)||[]),...segment.slice(1)].slice(-1440));
-          }else{displayTransitions.delete(s.id);trails.set(s.id,[s.state]);}
-        }else if(s.state&&!trails.has(s.id))trails.set(s.id,[s.state]);
-        displayStates.set(s.id,s);
-      }}while(displayStates.size>100){const oldest=Array.from(displayStates.keys()).find(id=>id!==selectedId);displayStates.delete(oldest);trails.delete(oldest);displayTransitions.delete(oldest);}renderList();renderDetail();}
+      satellites.set(s.id,s);if(!paused)setLiveRecord(s);
+      }while(displayStates.size>100){const oldest=Array.from(displayStates.keys()).find(id=>id!==selectedId);displayStates.delete(oldest);trails.delete(oldest);liveObservers.delete(oldest);}renderList();renderDetail();}
   async function loadList(more=false){const epoch=identityEpoch;message('正在读取卫星档案…');try{const data=await api('/api/satellites'+(more&&nextCursor?'?cursor='+encodeURIComponent(nextCursor):''));if(epoch!==identityEpoch)return;ingest(data.satellites||[]);nextCursor=data.nextCursor;$('loadMore').hidden=!nextCursor;serverStatus(data.server);message(satellites.size?'已载入 '+satellites.size+' 颗卫星。清空画面只隐藏显示，服务器会继续运行。':'还没有卫星。填写参数，开启第一次发射。');}catch(e){if(epoch===identityEpoch)message(e.message);}}
   function renderList(){
     const container=$('satellites');
@@ -283,18 +282,19 @@
       if(!node){const button=document.createElement('button'),title=document.createElement('strong'),meta=document.createElement('span');button.type='button';button.append(title,meta);button.onclick=()=>selectSatellite(s.id);node={button,title,meta};satelliteNodes.set(s.id,node);container.append(button);}
       const className='satellite'+(s.id===selectedId?' selected':'');if(node.button.className!==className)node.button.className=className;
       if(node.title.textContent!==s.name)node.title.textContent=s.name;
-      const text=`${statusText[s.status]||s.status} · ${(s.state?.elapsedSeconds||0).toFixed(2)} 模拟秒 · ${['active','queued'].includes(s.status)?'当前':'末态'}速度 ${units.formatSpeed(s.state,s.calibration||scale)}`;if(node.meta.textContent!==text)node.meta.textContent=text;
+      const state=observedPosition(s.id)||s.state,shown=displayStates.get(s.id)||s;
+      const text=`${statusText[shown.status]||shown.status} · ${(state?.elapsedSeconds||0).toFixed(2)} 模拟秒 · ${['active','queued'].includes(shown.status)?'当前':'末态'}速度 ${units.formatSpeed(state,s.calibration||scale)}${recovering?' · 预演':''}`;if(node.meta.textContent!==text)node.meta.textContent=text;
     }
   }
   function renderDetail(){const s=satellites.get(selectedId);$('fitSelected').disabled=!s;$('trackSelected').disabled=!s;if(!s)return;$('detail').hidden=false;$('detailName').textContent=s.name;
-    const t=s.telemetry||units.telemetry(s.state,s.calibration||scale);
-    $('detailMeta').textContent=`${s.id} · ${statusText[s.status]||s.status} · ${(s.state?.elapsedSeconds||0).toFixed(3)} 模拟秒 · 对应 ${t.physicalElapsedSeconds.toPrecision(4)} s 模型物理时间 · ${s.massKg} kg · ${s.initial.dynamicsVersion?'独立双体质量计算':'历史测试粒子模型'}`;
-    $('detailSpeed').textContent=`初速度 ${units.toKmS(s.initial.speed,s.calibration||scale).toLocaleString('zh-CN',{maximumFractionDigits:2})} km/s · ${s.status==='active'?'当前':'末态'}速度 ${units.formatSpeed(s.state,s.calibration||scale)}${t.physicalSpeedValid?` · vx ≈ ${t.vxKmS.toFixed(2)}，vy ≈ ${t.vyKmS.toFixed(2)} km/s · ${(t.fractionOfC*100).toFixed(2)}% c`:` · 模型给出 ${t.speedKmS.toFixed(2)} km/s，不能作为真实速度`}${s.calibrationInferred?' · 历史场景记录按示例质量换算':''}`;
+    const state=observedPosition(selectedId)||s.state,t=units.telemetry(state,s.calibration||scale),shown=displayStates.get(selectedId)||s;
+    $('detailMeta').textContent=`${s.id} · ${statusText[shown.status]||shown.status} · ${(state?.elapsedSeconds||0).toFixed(3)} 模拟秒 · 对应 ${t.physicalElapsedSeconds.toPrecision(4)} s 模型物理时间 · ${s.massKg} kg · ${s.initial.dynamicsVersion?'独立双体质量计算':'历史测试粒子模型'}${recovering?' · 补算期间的物理预演，正式记录以后台为准':''}`;
+    $('detailSpeed').textContent=`初速度 ${units.toKmS(s.initial.speed,s.calibration||scale).toLocaleString('zh-CN',{maximumFractionDigits:2})} km/s · ${shown.status==='active'?'当前':'末态'}速度 ${units.formatSpeed(state,s.calibration||scale)}${t.physicalSpeedValid?` · vx ≈ ${t.vxKmS.toFixed(2)}，vy ≈ ${t.vyKmS.toFixed(2)} km/s · ${(t.fractionOfC*100).toFixed(2)}% c`:` · 模型给出 ${t.speedKmS.toFixed(2)} km/s，不能作为真实速度`}${s.calibrationInferred?' · 历史场景记录按示例质量换算':''}`;
     $('terminate').disabled=!['active','queued'].includes(s.status)||!online;}
   async function selectSatellite(id){clearHistory();selectedId=id;setTracking(true);selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);historyPoints=[];historyMode=false;playing=false;impactWaves=[];replayCaptureShown=false;$('replay').hidden=true;$('downloadExport').hidden=true;$('historyMessage').textContent='';$('viewMode').textContent=paused?'观察已暂停 · 服务继续运行':'实时观察';hiddenLive=false;if(online&&sessionReady)openStream();renderList();renderDetail();const epoch=selectionEpoch;try{const data=await api('/api/satellites/'+encodeURIComponent(id));if(epoch===selectionEpoch)ingest([data.satellite]);}catch(e){if(epoch===selectionEpoch)message(e.message);}}
   $('launchForm').onsubmit=async e=>{e.preventDefault();if(launchBusy||!draft||!online||!sessionReady)return;const epoch=identityEpoch;launchBusy=true;if(!pendingLaunch)pendingLaunch={...readInput(),idempotencyKey:crypto.randomUUID()};updateLaunch();$('launchMessage').textContent='正在提交并保存出生档案…';try{const data=await api('/api/satellites',{method:'POST',body:JSON.stringify(pendingLaunch)});if(epoch!==identityEpoch)return;pendingLaunch=null;draftVisible=false;preview=[];previewToken++;ingest([data.satellite]);selectSatellite(data.satellite.id);$('launchMessage').textContent='发射已确认 · '+data.satellite.id;hiddenLive=false;}catch(error){if(epoch!==identityEpoch)return;if(error.status&&error.status<500&&error.status!==408&&error.status!==429)pendingLaunch=null;$('launchMessage').textContent=error.message+(pendingLaunch?' · 结果尚未确认，再次点击将安全重试同一发射。':'');}finally{launchBusy=false;updateLaunch();}};
   $('reconnect').onclick=connect;$('refresh').onclick=()=>loadList(false);$('loadMore').onclick=()=>loadList(true);
-  $('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'继续观察':'暂停观察';$('viewMode').textContent=paused?'观察已暂停 · 服务继续运行':'实时观察';if(!paused){for(const s of satellites.values()){const shown=displayStates.get(s.id);if(s.status==='captured'&&shown?.status==='active')captureVisual(s);}displayStates.clear();displayTransitions.clear();for(const s of Array.from(satellites.values()).slice(-100))displayStates.set(s.id,s);}};$('clear').onclick=()=>{clearHistory();$('replay').hidden=true;hiddenLive=true;historyMode=false;playing=false;$('viewMode').textContent='卫星已隐藏';message('已隐藏观察对象；没有停止计算或删除档案。');};$('showAll').onclick=()=>{clearHistory();$('replay').hidden=true;hiddenLive=false;historyMode=false;playing=false;$('viewMode').textContent=paused?'观察已暂停':'实时观察';};
+  $('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'继续观察':'暂停观察';$('viewMode').textContent=paused?'观察已暂停 · 服务继续运行':'实时观察';if(!paused){for(const s of satellites.values()){const shown=displayStates.get(s.id);if(s.status==='captured'&&shown?.status==='active')captureVisual(s);}resetLiveDrawing();}};$('clear').onclick=()=>{clearHistory();$('replay').hidden=true;hiddenLive=true;historyMode=false;playing=false;$('viewMode').textContent='卫星已隐藏';message('已隐藏观察对象；没有停止计算或删除档案。');};$('showAll').onclick=()=>{clearHistory();$('replay').hidden=true;hiddenLive=false;historyMode=false;playing=false;$('viewMode').textContent=paused?'观察已暂停':'实时观察';};
   $('recover').onclick=async()=>{const key=$('recoverInput').value.trim();if(!key||identityBusy)return;identityLock(true);try{const data=await api('/api/session/recover',{method:'POST',body:JSON.stringify({recoveryKey:key})});resetIdentity();currentUserId=data.user.id;csrf=data.csrfToken;sessionReady=true;online=true;revealKey(data.recoveryKey);$('recoverInput').value='';$('identityLabel').textContent='档案 '+data.user.id;await loadList();openStream();message('档案已恢复，无需更换原密钥。');}catch(e){message(e.message);}finally{identityLock(false);updateLaunch();}};
   $('rotateKey').onclick=async()=>{if(identityBusy)return;if(!sessionReady){message('请先重新连接，或恢复已有档案。');return;}if(!confirm('生成新的恢复密钥后，旧密钥将立即失效。继续？'))return;identityLock(true);try{const data=await api('/api/session/recovery-key',{method:'POST',body:'{}'});revealKey(data.recoveryKey);message('恢复密钥已轮换。请立即保存新密钥。');}catch(e){message(e.message);}finally{identityLock(false);}};
   $('logout').onclick=async()=>{if(identityBusy)return;identityLock(true);try{await api('/api/session',{method:'DELETE'});resetIdentity();online=false;$('identityLabel').textContent='已退出档案';$('connection').textContent='已退出';message('已退出，服务器继续计算。点击重新连接可建立新访客档案，或恢复已有档案。');updateLaunch();}catch(e){message(e.message);}finally{identityLock(false);}};

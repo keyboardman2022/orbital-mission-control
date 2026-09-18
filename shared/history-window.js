@@ -43,5 +43,29 @@
     if(Math.hypot(state.x-b.x,state.y-b.y)>1e-6||Math.hypot(state.vx-b.vx,state.vy-b.vy)>1e-6)return null;
     points[points.length-1]={...b};return points;
   }
-  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,loadWindow,mergeSnapshot,liveSegment};
+  function createLiveObserver(model){
+    let state=null,remainder=0;
+    const copy=s=>({...s,status:s.status||'active',escapeRadius:s.escapeRadius||1e30,continuousTracking:true});
+    return {
+      get state(){return state;},
+      accept(incoming,{recovering=false}={}){
+        if(state&&recovering&&!['terminated','error'].includes(incoming.status))return false;
+        if(state&&incoming.status==='active'&&Math.abs(incoming.tick-state.tick)<=model.MODEL.tickRate*2){
+          const earlier=copy(incoming.tick<state.tick?incoming:state),later=incoming.tick<state.tick?state:incoming;
+          while(earlier.tick<later.tick&&earlier.status==='active')model.step(earlier);
+          if(earlier.status===later.status&&Math.hypot(earlier.x-later.x,earlier.y-later.y)<1e-6&&Math.hypot(earlier.vx-later.vx,earlier.vy-later.vy)<1e-6)return false;
+        }
+        state=copy(incoming);remainder=0;return true;
+      },
+      advance(seconds){
+        if(state?.status!=='active')return [];
+        // Bound work after a suspended tab: resume smoothly rather than replay a long frame.
+        remainder+=Math.min(Math.max(0,seconds),.5)*model.MODEL.tickRate;
+        const steps=Math.floor(remainder+1e-9);remainder-=steps;const points=[];
+        for(let i=0;i<steps&&state.status==='active';i++){model.step(state);points.push(model.snapshot(state));}
+        return points;
+      }
+    };
+  }
+  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,loadWindow,mergeSnapshot,liveSegment,createLiveObserver};
 });
