@@ -194,11 +194,13 @@ class Engine{
   active(userId){return {satellites:[...this.records.values()].filter(r=>r.ownerId===userId&&['active','queued'].includes(r.status)).map(r=>this.publicRecord(r)),server:this.health()};}
   trajectory(userId,id,query={}){
     const r=this.owned(userId,id);if(query.cutoffSeq===undefined)this.checkpoint();
-    const after=integer(query.cursor,0),count=integer(query.limit,1000,1,5000),from=integer(query.fromTick,0),to=integer(query.toTick,r.state.tick);
-    if(from>to)fail(422,'起始时间不能晚于截止时间');
-    const cutoffSeq=integer(query.cutoffSeq,r.seq,0,r.seq),boundaries=query.boundaries==='1'||query.boundaries===true;
+    const trajectoryCoverage=Budget.coverage(r),after=integer(query.cursor,0),count=integer(query.limit,1000,1,5000);
+    const requestedFrom=integer(query.fromTick,0),requestedTo=integer(query.toTick,trajectoryCoverage.endTick);
+    if(requestedFrom>requestedTo)fail(422,'起始时间不能晚于截止时间');
+    const to=Math.min(requestedTo,trajectoryCoverage.endTick),from=Math.min(requestedFrom,to);
+    const cutoffSeq=integer(query.cutoffSeq,trajectoryCoverage.lastSeq,0,trajectoryCoverage.lastSeq),boundaries=query.boundaries==='1'||query.boundaries===true;
     const rows=readPoints(this.db,this.filename,{id,after,fromTick:from,toTick:to,cutoffSeq,limit:count+1,boundaries});
-    return {points:rows.slice(0,count).map(p=>({...p,...U.telemetry(p,r.initial.calibration||U.SCALE)})),nextCursor:rows.length>count?rows[count-1].seq:null,cutoffTick:to,cutoffSeq,sampling:r.sampling||{version:'legacy-linear-prediction-v1'},
+    return {points:rows.slice(0,count).map(p=>({...p,...U.telemetry(p,r.initial.calibration||U.SCALE)})),nextCursor:rows.length>count?rows[count-1].seq:null,cutoffTick:to,cutoffSeq,trajectoryCoverage,sampling:r.sampling||{version:'legacy-linear-prediction-v1'},
       calibration:r.initial.calibration||U.SCALE,calibrationInferred:!r.initial.calibration};
   }
   terminate(userId,id,{checkpoint=true}={}){
@@ -216,9 +218,10 @@ class Engine{
   prepareExport(userId,id,format){
     if(!['csv','json'].includes(format))fail(422,'仅支持 CSV 和 JSON');
     const r=this.owned(userId,id);if(r.birthTick===null)fail(409,'卫星尚未正式出生，没有可导出的轨迹');
-    if(r.status==='active'){this.records.set(id,r);this.sample(r,'cutoff');}
+    if(r.status==='active'&&!Budget.isCapped(r)){this.records.set(id,r);this.sample(r,'cutoff');}
     this.checkpoint();
-    const out={id:randomUUID(),satelliteId:id,format,status:'pending',cutoffTick:r.state.tick,cutoffSeq:r.seq,cutoffEventSeq:r.eventSeq,createdAt:new Date(this.now()).toISOString(),expiresAt:new Date(this.now()+7*86400000).toISOString(),satellite:this.publicRecord(r),model:M.MODEL};
+    const trajectoryCoverage=Budget.coverage(r);
+    const out={id:randomUUID(),satelliteId:id,format,status:'pending',cutoffTick:trajectoryCoverage.endTick,cutoffSeq:trajectoryCoverage.lastSeq,cutoffEventSeq:r.eventSeq,trajectoryCoverage,createdAt:new Date(this.now()).toISOString(),expiresAt:new Date(this.now()+7*86400000).toISOString(),satellite:this.publicRecord(r),model:M.MODEL};
     this.db.prepare('INSERT INTO exports VALUES (?,?,?,?)').run(out.id,userId,id,JSON.stringify(out));return out;
   }
   getExport(userId,id){const row=this.db.prepare('SELECT user_id,record FROM exports WHERE id=?').get(id);if(!row||row.user_id!==userId)fail(404,'找不到该导出任务');return JSON.parse(row.record);}

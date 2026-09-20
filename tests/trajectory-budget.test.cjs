@@ -1,10 +1,11 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {mkdtempSync,rmSync}=require('node:fs');
+const {mkdtempSync,rmSync,readFileSync}=require('node:fs');
 const {tmpdir}=require('node:os');
 const {join}=require('node:path');
 const {DatabaseSync}=require('node:sqlite');
+const {Worker}=require('node:worker_threads');
 const Budget=require('../server/trajectory-budget.js');
 const {Engine}=require('../server/engine.js');
 const {archiveBatch}=require('../server/trajectory-store.js');
@@ -69,4 +70,28 @@ test('archiving all hot points does not restore capped capacity',t=>{
   e.close();const restored=f.make();restored.advanceTo(1920);restored.checkpoint();
   assert.equal(restored.get(f.user,id).trajectoryCoverage.lastSeq,4);
   assert.equal(restored.trajectory(f.user,id,{limit:100}).points.length,4);
+});
+
+async function exportJob(f,record){
+  const target=join(f.dir,record.id+'.'+record.format),worker=new Worker(join(__dirname,'../server/export-worker.js'),{workerData:{filename:f.filename,target,record}});
+  const exit=new Promise(resolve=>worker.once('exit',resolve));
+  const result=await new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);});await exit;
+  assert.equal(result.status,'ready',result.message);return readFileSync(target,'utf8');
+}
+
+test('capped query and exports stop at coverage while current state continues',async t=>{
+  const f=fixture(t,{trajectoryMaxPoints:2}),e=f.engine,id=f.satellite.id;
+  e.advanceTo(480);e.checkpoint();const capped=e.get(f.user,id).trajectoryCoverage;
+  e.advanceTo(960);e.checkpoint();assert.ok(e.get(f.user,id).state.tick>capped.endTick);
+  const history=e.trajectory(f.user,id,{fromTick:0,toTick:Number.MAX_SAFE_INTEGER,limit:100});
+  assert.equal(history.cutoffTick,capped.endTick);assert.deepEqual(history.trajectoryCoverage,capped);
+  assert.equal(history.points.at(-1).seq,capped.lastSeq);
+  const jsonRecord=e.prepareExport(f.user,id,'json');
+  assert.equal(jsonRecord.cutoffTick,capped.endTick);assert.equal(jsonRecord.cutoffSeq,capped.lastSeq);
+  assert.equal(jsonRecord.trajectoryCoverage.truncated,true);
+  const json=JSON.parse(await exportJob(f,jsonRecord));
+  assert.deepEqual(json.trajectoryCoverage,capped);assert.equal(json.points.at(-1).seq,capped.lastSeq);
+  assert.ok(json.satellite.state.tick>json.trajectoryCoverage.endTick);assert.match(json.description,/存储上限/);
+  const csvRecord=e.prepareExport(f.user,id,'csv'),csv=await exportJob(f,csvRecord);
+  assert.match(csv,/trajectoryCoverage/);assert.match(csv,/truncated/);
 });

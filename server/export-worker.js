@@ -14,14 +14,16 @@ async function run(){
   out.on('error',error=>{writeError=error;});
   async function write(text){if(writeError)throw writeError;const data=Buffer.from(text);digest.update(data);bytes+=data.length;if(!out.write(data))await once(out,'drain');}
   try{
-    const metadata={satellite:record.satellite,model:record.model,cutoffTick:record.cutoffTick,cutoffSeq:record.cutoffSeq,createdAt:record.createdAt,integration:{method:'fixed-step velocity Verlet',stepSeconds:record.model.step,event:'linear drift segment boundary intersection',precisionNote:'非严格相对论。测试中最小半径80、切向初速度1000的一秒位置与16倍细步长结果相差约0.352场景单位；径向捕获事件时间误差小于0.002模拟秒。非全参数精度保证。'},sampling:{baseIntervalSeconds:1,innerRadius:4*record.model.rs,innerIntervalSeconds:record.model.step,linearPredictionErrorThreshold:.5},description:'世界坐标 +Y 向上；伪牛顿场景单位；记录完整追踪时段的采样点，并非每个积分步骤。'};
+    const metadata={satellite:record.satellite,model:record.model,cutoffTick:record.cutoffTick,cutoffSeq:record.cutoffSeq,trajectoryCoverage:record.trajectoryCoverage||record.satellite.trajectoryCoverage,createdAt:record.createdAt,integration:{method:'fixed-step velocity Verlet',stepSeconds:record.model.step,event:'linear drift segment boundary intersection',precisionNote:'非严格相对论。测试中最小半径80、切向初速度1000的一秒位置与16倍细步长结果相差约0.352场景单位；径向捕获事件时间误差小于0.002模拟秒。非全参数精度保证。'},sampling:{baseIntervalSeconds:1,innerRadius:4*record.model.rs,innerIntervalSeconds:record.model.step,linearPredictionErrorThreshold:.5},description:'世界坐标 +Y 向上；伪牛顿场景单位；记录完整追踪时段的采样点，并非每个积分步骤。'};
     const legacyPolicy={version:'legacy-adaptive-v1',baseIntervalSeconds:1,innerRadius:4*record.model.rs,innerIntervalSeconds:record.model.step,linearPredictionErrorThreshold:.5,description:'Historical sampling: one-second base interval, every integration step inside four Schwarzschild radii, or scene-unit linear prediction error above 0.5; birth, terminal and export cutoff retained.'};
     metadata.sampling=record.sampling||record.satellite.sampling||legacyPolicy;
     if(metadata.sampling.legacyThroughSeq>0&&!metadata.sampling.legacyPolicy)metadata.sampling={...metadata.sampling,legacyPolicy};
     metadata.dynamics=record.satellite.initial.dynamicsVersion?{...record.model.dynamics,gravitationalMu:record.satellite.state.gravitationalMu,relativeForceLaw:'a = -G(M+m) r_vector / [r (r-r_s)^2]',independent:true}:{version:'legacy-test-particle',gravitationalMu:record.model.mu,independent:true};
     metadata.calibration=record.satellite.calibration||U.SCALE;
     metadata.physicalUnits={distance:'km',speed:'km/s',time:'s',mass:'kg'};
-    metadata.description='世界坐标 +Y 向上；原始 x/y/vx/vy 为场景单位，另附 km 和 km/s 换算。10 倍标称太阳质量为假设示例；历史记录的换算会标记 calibrationInferred。伪牛顿模型不是相对论测量；physicalSpeedValid=false 时，speedKmS 不可视为真实物理速度。记录为采样点，并非每一步积分。';
+    metadata.description=metadata.trajectoryCoverage?.truncated
+      ?'世界坐标 +Y 向上；轨迹坐标仅覆盖出生至约 100 MiB 存储上限，卫星当前或最终状态及生命周期事件可能晚于轨迹末端。原始 x/y/vx/vy 为场景单位，另附 km 和 km/s 换算。伪牛顿模型不是相对论测量。'
+      :'世界坐标 +Y 向上；原始 x/y/vx/vy 为场景单位，另附 km 和 km/s 换算。10 倍标称太阳质量为假设示例；历史记录的换算会标记 calibrationInferred。伪牛顿模型不是相对论测量；physicalSpeedValid=false 时，speedKmS 不可视为真实物理速度。记录为采样点，并非每一步积分。';
     metadata.events=db.prepare('SELECT event FROM events WHERE satellite_id=? AND seq<=? ORDER BY seq').all(record.satelliteId,record.cutoffEventSeq).map(row=>JSON.parse(row.event));
     const csv=value=>{let s=String(value??'');if(typeof value==='string'&&/^[=+@\-\t\r\n]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';};
     if(record.format==='json')await write(JSON.stringify(metadata).slice(0,-1)+',"points":[');
