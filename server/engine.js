@@ -4,6 +4,7 @@ const {randomUUID,randomBytes,createHash}=require('node:crypto');
 const M=require('../shared/simulation.js');
 const U=require('../shared/units.js');
 const {createSampler,POLICY}=require('./trajectory-sampler.js');
+const Budget=require('./trajectory-budget.js');
 const {initializeStore,readPoints,archiveBatch}=require('./trajectory-store.js');
 const {statSync}=require('node:fs');
 const hash=value=>createHash('sha256').update(String(value)).digest('hex');
@@ -14,12 +15,13 @@ function integer(value,fallback,min=0,max=Number.MAX_SAFE_INTEGER){
   const n=Number(value);if(!Number.isSafeInteger(n)||n<min||n>max)fail(422,'无效的分页或时间参数');return n;
 }
 class Engine{
-  constructor({filename,now=Date.now,maxActive=1000,velocityRelativeTolerance=.001}){
+  constructor({filename,now=Date.now,maxActive=1000,velocityRelativeTolerance=.001,trajectoryMaxPoints=Budget.DEFAULT_MAX_POINTS}){
     if(!Number.isFinite(velocityRelativeTolerance)||velocityRelativeTolerance<0||velocityRelativeTolerance>.01)throw new Error('速度相对记录容差须在0–0.01范围内');
     this.samplingPolicy={...POLICY,velocityRelativeTolerance};
     this.filename=filename;this.samplers=new Map();
     this.metrics={rawSteps:0,savedPoints:0,checkpointMs:0,checkpointMaxMs:0,archivedPoints:0,archiveMs:0,archiveError:null};
     this.maxActive=maxActive;
+    this.trajectoryPolicy=Budget.createPolicy(trajectoryMaxPoints);
     this.now=now;this.db=new DatabaseSync(filename);this.db.exec(`
       PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -44,6 +46,8 @@ class Engine{
     this.records=new Map();this.dirty=new Set();this.pending=[];this.pendingEvents=[];
     for(const row of this.db.prepare('SELECT record FROM satellites').iterate()){
       const r=JSON.parse(row.record);if(r.status==='active'||r.status==='queued'){
+        const budgetBefore=JSON.stringify(r.trajectoryBudget);Budget.ensure(r,this.trajectoryPolicy);
+        if(JSON.stringify(r.trajectoryBudget)!==budgetBefore)this.dirty.add(r.id);
         // Keep all committed coordinates/times; extend tracking only for live records.
         if(!r.state.continuousTracking){r.state.continuousTracking=true;this.dirty.add(r.id);}
         this.records.set(r.id,r);
@@ -91,7 +95,7 @@ class Engine{
   }
   publicRecord(r){const {ownerId,seq,lastSample,eventSeq,requestHash,...result}=r;return structuredClone({...result,
     calibration:r.initial.calibration||U.SCALE,calibrationInferred:!r.initial.calibration,
-    telemetry:U.telemetry(r.state,r.initial.calibration||U.SCALE)});}
+    telemetry:U.telemetry(r.state,r.initial.calibration||U.SCALE),trajectoryCoverage:Budget.coverage(r)});}
   get(userId,id){return this.publicRecord(this.owned(userId,id));}
   launch(userId,input){
     const initial=M.validateLaunch(input),idem=input.idempotencyKey;
@@ -105,10 +109,10 @@ class Engine{
     this.checkpoint();
     const id=randomUUID(),queued=this.targetTick()-this.tick>120,createdMs=Math.floor(this.now()),nameGenerated=!initial.name;
     if(nameGenerated)initial.name='SAT-'+hash(`${createdMs}:${id}`).slice(0,16);
-    const r={id,ownerId:userId,name:initial.name,massKg:initial.massKg,initial,sampling:{...this.samplingPolicy,legacyThroughSeq:0},...(nameGenerated?{nameGenerated:true,nameTimestampMs:createdMs}:{}),status:queued?'queued':'active',birthTick:queued?null:this.tick,state:M.createState(initial,{continuousTracking:true}),createdAt:new Date(createdMs).toISOString(),endReason:null,seq:0,eventSeq:0,lastSample:null};
+    const r={id,ownerId:userId,name:initial.name,massKg:initial.massKg,initial,sampling:{...this.samplingPolicy,legacyThroughSeq:0},trajectoryBudget:{...this.trajectoryPolicy,status:'recording',cappedAt:null},...(nameGenerated?{nameGenerated:true,nameTimestampMs:createdMs}:{}),status:queued?'queued':'active',birthTick:queued?null:this.tick,state:M.createState(initial,{continuousTracking:true}),createdAt:new Date(createdMs).toISOString(),endReason:null,seq:0,eventSeq:0,lastSample:null};
     if(queued)r.state.status='queued';
     this.transaction(()=>{
-      if(!queued){r.lastSample={...M.snapshot(r.state),kind:'birth',seq:++r.seq};r.eventSeq=1;}
+      if(!queued){r.lastSample={...M.snapshot(r.state),kind:'birth'};Budget.admit(r,r.lastSample);r.eventSeq=1;}
       this.db.prepare('INSERT INTO satellites VALUES (?,?,?,?,?,?)').run(id,userId,this.now(),idem,requestHash,JSON.stringify(r));
       if(r.lastSample)this.insertPoint(r.id,r.lastSample);
       if(!queued)this.db.prepare('INSERT INTO events VALUES (?,?,?)').run(id,1,JSON.stringify({type:'birth',tick:0,worldTick:r.birthTick,elapsedSeconds:0,x:r.state.x,y:r.state.y}));
@@ -119,22 +123,28 @@ class Engine{
   }
   insertPoint(id,p){this.sql.point.run(id,p.seq,p.tick,p.elapsedSeconds,p.x,p.y,p.vx,p.vy,p.kind);}
   enqueuePoint(r,p){
-    p.seq=++r.seq;r.lastSample=p;this.pending.push({id:r.id,p});this.dirty.add(r.id);
+    if(!Budget.admit(r,p))return false;
+    this.pending.push({id:r.id,p});this.dirty.add(r.id);
+    if(Budget.isCapped(r))this.samplers.delete(r.id);
+    return true;
   }
   ensureSampler(r){
+    Budget.ensure(r,this.trajectoryPolicy);if(Budget.isCapped(r))return null;
     if(this.samplers.has(r.id))return this.samplers.get(r.id);
     if(!r.sampling){
       // Close the old policy at the exact durable state without rewriting any historical row.
       if(r.lastSample?.tick!==r.state.tick||r.lastSample?.elapsedSeconds!==r.state.elapsedSeconds)this.enqueuePoint(r,{...M.snapshot(r.state),kind:'sampling-transition'});
       r.sampling={...this.samplingPolicy,legacyThroughSeq:r.seq};this.dirty.add(r.id);
     }
+    if(Budget.isCapped(r))return null;
     const sampler=createSampler(M.snapshot(r.state),r.initial.calibration||U.SCALE,{velocityRelativeTolerance:r.sampling.velocityRelativeTolerance??0});this.samplers.set(r.id,sampler);return sampler;
   }
   flushSampler(r,kind){
+    if(Budget.isCapped(r)){this.samplers.delete(r.id);return;}
     const sampler=this.samplers.get(r.id),points=sampler?sampler.flush():[];
     if(kind&&points.length)points.at(-1).kind=kind;
-    for(const p of points)this.enqueuePoint(r,p);
-    if(kind&&!points.length)this.enqueuePoint(r,{...M.snapshot(r.state),kind});
+    for(const p of points)if(!this.enqueuePoint(r,p))break;
+    if(kind&&!points.length&&!Budget.isCapped(r))this.enqueuePoint(r,{...M.snapshot(r.state),kind});
   }
   sample(r,kind){this.flushSampler(r,kind||(r.state.status==='active'?'sample':r.state.status));}
   finish(r,type){
@@ -148,9 +158,9 @@ class Engine{
       const active=[...this.records.values()].filter(r=>r.status==='active');
       if(!active.length){this.tick=target;break;}
       for(const r of active){
-        const sampler=this.ensureSampler(r);M.step(r.state);this.metrics.rawSteps++;sampler.push(M.snapshot(r.state));this.dirty.add(r.id);
+        const sampler=this.ensureSampler(r);M.step(r.state);this.metrics.rawSteps++;if(sampler)sampler.push(M.snapshot(r.state));this.dirty.add(r.id);
         if(r.state.status!=='active'){this.finish(r,r.state.status);continue;}
-        if(sampler.size>=POLICY.blockTicks+1)this.flushSampler(r);
+        if(sampler?.size>=POLICY.blockTicks+1)this.flushSampler(r);
       }
       this.tick++;steps++;
     }
