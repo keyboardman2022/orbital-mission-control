@@ -11,6 +11,47 @@
     return result;
   }
   function createCache(maxPoints=MAX_POINTS){return {range:null,points:[],set(range,points){if(points.length>maxPoints)throw new Error('History point bound exceeded');this.range={...range};this.points=points;},contains(time){return !!this.range&&time>=this.points[0]?.elapsedSeconds&&time<=this.points[this.points.length-1]?.elapsedSeconds;},clear(){this.range=null;this.points=[];}};}
+  function createTrail(maxPoints=6000){
+    if(!Number.isSafeInteger(maxPoints)||maxPoints<2)throw new Error('Replay trail point bound must be at least two');
+    let segments=[];
+    const key=point=>Number.isSafeInteger(point.seq)?'s:'+point.seq:`t:${point.tick}:${point.elapsedSeconds}`;
+    const mergePoints=(left,right)=>{
+      const unique=new Map();for(const point of [...left,...right])unique.set(key(point),point);
+      return [...unique.values()].sort((a,b)=>a.elapsedSeconds-b.elapsedSeconds||a.tick-b.tick);
+    };
+    const sample=(points,limit)=>{
+      if(points.length<=limit)return points;if(limit===1)return [points.at(-1)];
+      const result=[];for(let i=0;i<limit;i++)result.push(points[Math.round(i*(points.length-1)/(limit-1))]);return result;
+    };
+    const rebalance=()=>{
+      let total=segments.reduce((sum,segment)=>sum+segment.points.length,0);
+      while(total>maxPoints){
+        const candidate=segments.reduce((best,segment)=>segment.points.length>(best?.points.length||2)?segment:best,null);
+        if(!candidate){const removed=segments.shift();total-=removed.points.length;continue;}
+        const target=Math.max(2,candidate.points.length-(total-maxPoints));candidate.points=sample(candidate.points,target);
+        total=segments.reduce((sum,segment)=>sum+segment.points.length,0);
+      }
+    };
+    return {
+      add(range,points){
+        if(!range||!Array.isArray(points)||!points.length)return;
+        const incoming={fromTick:Number(range.fromTick),toTick:Number(range.toTick),points:mergePoints([],points)};
+        const ordered=[...segments,incoming].sort((a,b)=>a.fromTick-b.fromTick),merged=[];
+        for(const segment of ordered){const previous=merged.at(-1);if(previous&&segment.fromTick<=previous.toTick+1){previous.toTick=Math.max(previous.toTick,segment.toTick);previous.points=mergePoints(previous.points,segment.points);}else merged.push({...segment,points:[...segment.points]});}
+        segments=merged;rebalance();
+      },
+      visible(time){
+        const result=[];
+        for(const segment of segments){const points=segment.points;if(!points.length||time<points[0].elapsedSeconds)continue;
+          let lo=0,hi=points.length-1;while(lo<hi){const mid=Math.ceil((lo+hi)/2);if(points[mid].elapsedSeconds<=time)lo=mid;else hi=mid-1;}
+          const visible=points.slice(0,lo+1);if(lo<points.length-1&&time>points[lo].elapsedSeconds){const point=interpolate([points[lo],points[lo+1]],time);if(point)visible.push(point);}result.push(visible);
+        }return result;
+      },
+      clear(){segments=[];},
+      get pointCount(){return segments.reduce((sum,segment)=>sum+segment.points.length,0);},
+      get segmentCount(){return segments.length;}
+    };
+  }
   async function loadWindow(initialRange,fetchPage,{maxPoints=MAX_POINTS,targetTick=(initialRange.fromTick+initialRange.toTick)/2,cutoffSeq}={}){
     let range={...initialRange};
     for(;;){
@@ -67,5 +108,5 @@
       }
     };
   }
-  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,loadWindow,mergeSnapshot,liveSegment,createLiveObserver};
+  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,createTrail,loadWindow,mergeSnapshot,liveSegment,createLiveObserver};
 });

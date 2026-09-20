@@ -31,6 +31,29 @@ test('cache replaces the previous window and rejects oversized data rather than 
   assert.throws(()=>cache.set({fromTick:0,toTick:4},[...points,...points]),/bound/);
 });
 
+test('replay trail retains loaded windows, clips at playback time and keeps gaps separate',()=>{
+  const trail=history.createTrail(8);
+  trail.add({fromTick:0,toTick:20},[
+    {seq:1,tick:0,elapsedSeconds:0,x:0,y:0,vx:1,vy:0},
+    {seq:2,tick:10,elapsedSeconds:10,x:10,y:0,vx:1,vy:0},
+    {seq:3,tick:20,elapsedSeconds:20,x:20,y:0,vx:1,vy:0}
+  ]);
+  trail.add({fromTick:20,toTick:40},[
+    {seq:3,tick:20,elapsedSeconds:20,x:20,y:0,vx:1,vy:0},
+    {seq:4,tick:30,elapsedSeconds:30,x:30,y:0,vx:1,vy:0},
+    {seq:5,tick:40,elapsedSeconds:40,x:40,y:0,vx:1,vy:0}
+  ]);
+  assert.equal(trail.segmentCount,1);
+  assert.deepEqual(trail.visible(25)[0].map(point=>point.elapsedSeconds),[0,10,20,25]);
+  trail.add({fromTick:100,toTick:110},[
+    {seq:10,tick:100,elapsedSeconds:100,x:100,y:0,vx:1,vy:0},
+    {seq:11,tick:110,elapsedSeconds:110,x:110,y:0,vx:1,vy:0}
+  ]);
+  assert.equal(trail.segmentCount,2);
+  assert.deepEqual(trail.visible(110).map(segment=>segment.map(point=>point.elapsedSeconds)),[[0,10,20,30,40],[100,110]]);
+  assert.ok(trail.pointCount<=8);
+});
+
 test('lightweight snapshots preserve initial metadata and do not invent incomplete records',()=>{
   const old={id:'one',name:'卫星',massKg:1000,initial:{speed:1},state:{tick:1},status:'active'};
   const merged=history.mergeSnapshot(old,{id:'one',state:{tick:2},status:'terminated'});
@@ -206,6 +229,15 @@ test('mission playback pauses while crossing a window edge and resumes after the
   h.frames[1](100);assert.equal(h.node('timeline').value,pausedTime);assert.equal(h.requests.length,2);
   h.requests[1].resolve({points:windowPoints(1,22),nextCursor:null,cutoffSeq:500});await h.flush();
   h.frames[2](150);assert.ok(Number(h.node('timeline').value)>Number(pausedTime));assert.equal(h.node('play').textContent,'暂停');
+});
+
+test('mission retains contiguous replay windows as one cumulative trajectory',async()=>{
+  const h=await missionHarness(),initial=h.node('history').onclick();
+  h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:500});await initial;
+  h.node('timeline').value=20;h.node('timeline').oninput();
+  h.requests[1].resolve({points:windowPoints(10,30),nextCursor:null,cutoffSeq:500});await h.flush();
+  assert.match(h.node('historyMessage').textContent,/累计保留/);
+  assert.match(h.node('historyMessage').textContent,/1 段/);
 });
 
 test('mission switching satellites rejects a late history window and preserves patch metadata',async()=>{

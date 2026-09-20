@@ -19,7 +19,7 @@
   let csrf='',online=false,sessionReady=false,stream=null,streamEpoch=0,connecting=false,identityEpoch=0,selectionEpoch=0,selectedId=null;
   let satellites=new Map(),trails=new Map(),displayStates=new Map(),liveObservers=new Map(),hiddenLive=false,paused=false,nextCursor=null;
   let historyPoints=[],historyMode=false,playing=false,replayElapsed=0,lastFrame=performance.now(),recoveryKey='',pendingLaunch=null,launchBusy=false;
-  const history=OrbitalHistory,historyCache=history.createCache();
+  const history=OrbitalHistory,historyCache=history.createCache(),historyTrail=history.createTrail(6000);
   let historySnapshot=null,historyCutoffSeq,historyVersion=0,historyController=null,historyLoading=false,historyResume=false;
   let exportTimer=null,exportEpoch=0,lastServerTick=-1,currentUserId=null,identityBusy=false,deletingId=null;
   function identityLock(busy){identityBusy=busy;for(const id of ['reconnect','recover','rotateKey','logout'])$(id).disabled=busy;}
@@ -178,7 +178,7 @@
     distanceGrid();
     if(view.scale*model.MODEL.rs>12){ring(model.MODEL.rs,'#a4dba650');const q=project(model.MODEL.rs,0);ctx.fillStyle='#a4dba6';ctx.font='10px ui-monospace,monospace';ctx.fillText('r_s = '+units.formatKm(scale.schwarzschildRadiusKm),q.x+8,q.y+14);}
     if(preview.length&&draftVisible&&!historyMode)line(preview,'#ffaa6680',1,[4,6]);
-    if(historyMode&&historyPoints.length){const step=Math.max(1,Math.ceil(historyPoints.length/2200));const visibility=OrbitalVisuals.satelliteAppearance(view.scale).opacity;if(visibility>=.001)line(historyPoints.filter((_,i)=>i%step===0),`rgba(164,219,166,${visibility*.3})`,view.scale*2);const point=replayPoint(replayElapsed),last=historyPoints.at(-1);if(point&&!(last.kind==='captured'&&replayElapsed>=last.elapsedSeconds-1e-9))drawSatellite(point,'回放 / '+(satellites.get(selectedId)?.name||''),true,satellites.get(selectedId)?.massKg||1000);}
+    if(historyMode&&historyPoints.length){for(const segment of historyTrail.visible(replayElapsed))if(segment.length>1)line(segment,'rgba(164,219,166,.52)',1.25);const point=replayPoint(replayElapsed),last=historyPoints.at(-1);if(point&&!(last.kind==='captured'&&replayElapsed>=last.elapsedSeconds-1e-9))drawSatellite(point,'回放 / '+(satellites.get(selectedId)?.name||''),true,satellites.get(selectedId)?.massKg||1000);}
     else if(!hiddenLive&&!historyMode){for(const [id,s]of displayStates){
       if(!['active','captured','escaped'].includes(s.status))continue;
       if(s.status==='captured'&&!impactWaves.some(w=>w.id===id))continue;
@@ -223,7 +223,7 @@
     message(`「${s.name}」已被黑洞吞噬 · 存活 ${s.state.elapsedSeconds.toFixed(3)} 模拟秒`);
   }
   function replayPoint(time){return history.interpolate(historyPoints,time);}
-  function clearHistory(){historyVersion++;historyController?.abort();historyController=null;historyLoading=false;historyResume=false;historySnapshot=null;historyCutoffSeq=undefined;historyCache.clear();historyPoints=[];$('history').disabled=false;$('play').textContent='播放';}
+  function clearHistory(){historyVersion++;historyController?.abort();historyController=null;historyLoading=false;historyResume=false;historySnapshot=null;historyCutoffSeq=undefined;historyCache.clear();historyTrail.clear();historyPoints=[];$('history').disabled=false;$('play').textContent='播放';}
   function cachedHistory(time){const tick=Math.min(historySnapshot?.tick??0,time*model.MODEL.tickRate),range=historyCache.range;return !!range&&tick>=range.fromTick&&tick<=range.toTick&&historyCache.contains(time);}
   async function requestHistory(time,resume=false){
     if(!historySnapshot)return false;
@@ -249,10 +249,10 @@
         return data;
       },{targetTick:replayElapsed*model.MODEL.tickRate,cutoffSeq:historyCutoffSeq});
       if(!current())return false;
-      historyCutoffSeq=result.cutoffSeq;historyCache.set(result.range,result.points);historyPoints=historyCache.points;
+      historyCutoffSeq=result.cutoffSeq;historyCache.set(result.range,result.points);historyPoints=historyCache.points;historyTrail.add(result.range,result.points);
       if(!historyCache.contains(replayElapsed))throw new Error('此时刻尚无可插值的已归档采样点，请稍后重新加载历史。');
       playing=historyResume;historyResume=false;$('play').textContent=playing?'暂停':'播放';
-      $('historyMessage').textContent=`当前窗口 ${historyPoints.length} 个采样点 · 截止 tick ${historySnapshot.tick}。拖动完整时间轴按需读取历史，回放位置在相邻采样点间插值。${historySnapshot.trajectoryCoverage?.status==='capped'?' 轨迹仅记录到存储上限。':''}`;updateReplayLabel();return true;
+      $('historyMessage').textContent=`当前窗口 ${historyPoints.length} 个采样点 · 累计保留 ${historyTrail.pointCount} 个采样点 / ${historyTrail.segmentCount} 段已加载轨迹 · 截止 tick ${historySnapshot.tick}。拖动完整时间轴按需读取历史，回放轨迹会随时间推进持续绘制。${historySnapshot.trajectoryCoverage?.status==='capped'?' 轨迹仅记录到存储上限。':''}`;updateReplayLabel();return true;
     }catch(e){if(current()){playing=false;historyResume=false;$('play').textContent='播放';$('historyMessage').textContent=e.message;}return false;}
     finally{if(current()){historyLoading=false;$('history').disabled=false;}}
   }
