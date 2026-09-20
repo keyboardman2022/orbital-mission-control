@@ -25,7 +25,7 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
   dataDir=resolve(dataDir);mkdirSync(dataDir,{recursive:true});const exportsDir=join(dataDir,'exports');mkdirSync(exportsDir,{recursive:true});
   const unlock=acquireLock(dataDir),filename=join(dataDir,'orbital.sqlite');
   const worker=new Worker(join(__dirname,'simulation-worker.js'),{workerData:{filename,maxActive,velocityRelativeTolerance}});
-  let rpcId=0,alive=true,closing=false;const pending=new Map(),streams=new Set(),exportWorkers=new Set(),exportQueue=[];
+  let rpcId=0,alive=true,closing=false;const pending=new Map(),streams=new Set(),exportWorkers=new Map(),exportQueue=[];
   const rpc=(method,...args)=>new Promise((resolve,reject)=>{
     if(!alive)return reject(error(503,'模拟服务暂不可用'));
     if(pending.size>=1000)return reject(error(503,'请求队列已满，请稍后重试'));
@@ -59,10 +59,16 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
   const rates=new Map();
   function rate(req,key,max){const id=(req.socket.remoteAddress||'local')+':'+key,now=Date.now(),old=rates.get(id);const r=old&&now-old.start<60000?old:{start:now,n:0};r.n++;rates.set(id,r);if(r.n>max)throw error(429,'操作过于频繁，请一分钟后重试');}
   function publicExport(record){const {satellite,model,...out}=record;return {...out,downloadUrl:record.status==='ready'?`/api/exports/${record.id}/download`:null};}
+  function removeExportFiles(ids){for(const id of ids)for(const suffix of ['.json','.csv','.json.partial','.csv.partial'])try{unlinkSync(join(exportsDir,id+suffix));}catch(error){if(error.code!=='ENOENT')console.error('清理导出文件失败：',error.message);}}
+  async function cancelSatelliteExports(satelliteId){
+    for(let i=exportQueue.length-1;i>=0;i--)if(exportQueue[i].satelliteId===satelliteId)exportQueue.splice(i,1);
+    const active=[...exportWorkers].filter(([,record])=>record.satelliteId===satelliteId).map(([worker])=>worker.terminate());
+    await Promise.allSettled(active);
+  }
   function startExport(){
     if(closing||exportWorkers.size>=2||!exportQueue.length)return;
     const record=exportQueue.shift(),target=join(exportsDir,record.id+'.'+record.format);
-    const ew=new Worker(join(__dirname,'export-worker.js'),{workerData:{filename,target,record}});exportWorkers.add(ew);let reported=false;
+    const ew=new Worker(join(__dirname,'export-worker.js'),{workerData:{filename,target,record}});exportWorkers.set(ew,record);let reported=false;
     ew.on('message',async result=>{reported=true;try{await rpc('finishExport',record.id,result);}catch{}});
     ew.on('error',async()=>{reported=true;try{await rpc('finishExport',record.id,{status:'failed',message:'导出失败，请重试'});}catch{}});
     ew.on('exit',async()=>{exportWorkers.delete(ew);if(!reported)try{await rpc('finishExport',record.id,{status:'failed',message:'导出中断，请重试'});}catch{}startExport();});
@@ -109,6 +115,13 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       if(sat){
         const [,id,action]=sat;
         if(!action&&req.method==='GET')return json(res,200,{satellite:await rpc('get',auth.userId,id)});
+        if(!action&&req.method==='DELETE'){
+          rate(req,'delete',120);await rpc('get',auth.userId,id);await cancelSatelliteExports(id);
+          const deleted=await rpc('deleteSatellite',auth.userId,id);removeExportFiles(deleted.exportIds);
+          if(deleted.archiveCleanupFailures.length)console.error('部分轨迹归档文件未能清理：',deleted.archiveCleanupFailures.length);
+          for(const stream of streams)if(stream.userId===auth.userId&&stream.selectedId===id)stream.selectedId=null;
+          return json(res,200,{deleted:{id:deleted.id}});
+        }
         if(action==='trajectory'&&req.method==='GET')return json(res,200,await rpc('trajectory',auth.userId,id,Object.fromEntries(url.searchParams)));
         if(action==='terminate'&&req.method==='POST'){await body(req);return json(res,200,{satellite:await rpc('terminate',auth.userId,id)});}
         if(action==='exports'&&req.method==='POST'){
@@ -146,7 +159,7 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
   async function close(){
     if(closing)return;closing=true;clearInterval(push);clearInterval(cleanup);for(const s of streams)s.res.end();streams.clear();
     const stopped=new Promise(resolve=>server.close(resolve));server.closeIdleConnections();
-    for(const ew of exportWorkers)await ew.terminate();
+    for(const ew of exportWorkers.keys())await ew.terminate();
     try{await rpc('close');}catch{}await worker.terminate();await stopped;unlock();
   }
   return {server,url,close,worker};

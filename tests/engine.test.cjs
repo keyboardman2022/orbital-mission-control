@@ -1,9 +1,10 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {mkdtempSync,rmSync}=require('node:fs');
+const {mkdtempSync,rmSync,existsSync}=require('node:fs');
 const {tmpdir}=require('node:os');
 const {join}=require('node:path');
 const {Engine}=require('../server/engine.js');
+const {archiveBatch,archivePath}=require('../server/trajectory-store.js');
 const launch={name:'Voyager',position:{x:330,y:0},massKg:1000,speed:97.31236802019037,directionDeg:90,modelVersion:'pw-2d-v1',idempotencyKey:'test-request-0001'};
 function fixture(t){const dir=mkdtempSync(join(tmpdir(),'orbital-engine-')),engines=[];t.after(()=>{for(const e of engines)e.close();rmSync(dir,{recursive:true,force:true});});let now=100000;const file=join(dir,'test.sqlite');const make=()=>{const e=new Engine({filename:file,now:()=>now});engines.push(e);return e;};return {file,make,setNow:n=>now=n};}
 
@@ -90,4 +91,17 @@ test('formal tracking continues beyond former escape boundary and persists veloc
  const points=e.trajectory(u,p.id,{limit:5000}).points;
  assert.equal(points.at(-1).speed,Math.hypot(points.at(-1).vx,points.at(-1).vy));
  e.close();const restored=f.make().get(u,p.id);assert.deepEqual(restored.telemetry,s.telemetry);
+});
+
+test('deleting an active satellite removes its database rows and archived trajectory without touching another owner',t=>{
+ const f=fixture(t),e=f.make(),owner=e.guest().user.id,other=e.guest().user.id;
+ const satellite=e.launch(owner,{...launch,idempotencyKey:'delete-record'});e.advanceTo(960);e.checkpoint();
+ e.prepareExport(owner,satellite.id,'json');
+ const chunk=archiveBatch(e.db,f.file,{cutoffWorldTick:100000,maxPoints:100});
+ assert.equal(chunk.satellite_id,satellite.id);const sidecar=archivePath(f.file,chunk.file);assert.equal(existsSync(sidecar),true);
+ assert.throws(()=>e.deleteSatellite(other,satellite.id),{status:404});assert.ok(e.get(owner,satellite.id));
+ const deleted=e.deleteSatellite(owner,satellite.id);assert.equal(deleted.id,satellite.id);assert.equal(deleted.exportIds.length,1);
+ assert.equal(existsSync(sidecar),false);assert.throws(()=>e.get(owner,satellite.id),{status:404});assert.equal(e.active(owner).satellites.length,0);
+ for(const table of ['satellites','points','events','trajectory_chunks','exports'])assert.equal(e.db.prepare(`SELECT count(*) n FROM ${table} WHERE ${table==='satellites'?'id':table==='exports'?'satellite_id':'satellite_id'}=?`).get(satellite.id).n,0,table);
+ e.advanceTo(1200);e.checkpoint();assert.throws(()=>e.get(owner,satellite.id),{status:404});
 });

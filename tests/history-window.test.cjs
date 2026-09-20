@@ -76,26 +76,27 @@ test('paged loader fails a nonadvancing cursor instead of looping forever',async
 
 async function missionHarness(status='terminated',trajectoryCoverage=null){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js');
-  const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],sweepRequests=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
+  const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],sweepRequests=[],deleteRequests=[],confirmations=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
   function node(id){if(nodes.has(id))return nodes.get(id);let value='';const handlers={};const result={id,children:[],style:{},dataset:{},checked:false,hidden:false,disabled:false,textContent:'',get value(){return value;},set value(v){value=String(v);},setAttribute(){},removeAttribute(){},addEventListener(type,fn){handlers[type]=fn;},dispatch(type,event={}){handlers[type]?.(event);},after(){},remove(){},append(...items){this.children.push(...items);},querySelector(selector){return node(id+selector);},getContext(){return context2d;},getBoundingClientRect(){return {width:1000,height:800,left:0,top:0};},classList:{toggle(){},add(){},remove(){}}};nodes.set(id,result);return result;}
   for(const [id,value]of Object.entries({name:'',x:units.toKm(500),y:0,massKg:1000,speed:0,directionDeg:0,rate:1}))node(id).value=value;
   const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1},...(trajectoryCoverage?{trajectoryCoverage}:{})};
   node('exportJson').dataset.export='json';
   const reply=data=>({ok:true,json:async()=>data});
-  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
+  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},confirm:text=>{confirmations.push(text);return true;},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
     if(path.includes('/trajectory?'))return new Promise(resolve=>requests.push({path,options,resolve:data=>resolve(reply(data))}));
     if(path==='/api/session/guest')return reply({user:{id:'user'},csrfToken:'token'});
     if(path==='/api/model')return reply({model:model.MODEL,server:{tick:1}});
     if(path==='/api/satellites')return reply({satellites:[satellite],server:{tick:1},nextCursor:null});
     if(path==='/api/satellites/active')return reply({satellites:[satellite],server:{tick:1}});
     if(path==='/api/satellites/terminate-many'){sweepRequests.push(JSON.parse(options.body));return reply({satellites:[{...satellite,status:'terminated'}]});}
+    if(path==='/api/satellites/one'&&options?.method==='DELETE')return new Promise(resolve=>deleteRequests.push({path,options,resolve:()=>resolve(reply({deleted:{id:'one'}}))}));
     if(path==='/api/satellites/one/exports')return reply({export:{id:'export-one',format:'json',status:'ready',cutoffTick:trajectoryCoverage?.endTick??satellite.state.tick,trajectoryCoverage}});
     return reply({satellite});
   }};
   vm.runInNewContext(fs.readFileSync(require.resolve('../mission.js'),'utf8'),sandbox);
   const flush=()=>new Promise(resolve=>setImmediate(resolve));await flush();
   await node('satellites').children[0].onclick();
-  return {node,requests,flush,frames,streams,satellite,liveRenders,liveTrails,sweepRequests};
+  return {node,requests,flush,frames,streams,satellite,liveRenders,liveTrails,sweepRequests,deleteRequests,confirmations};
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
@@ -117,6 +118,22 @@ test('recording trajectory keeps the lifecycle replay endpoint',async()=>{
  h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:10,trajectoryCoverage:coverage});await loading;
  assert.equal(Number(h.node('timeline').max),h.satellite.state.elapsedSeconds);
  assert.doesNotMatch(h.node('detailMeta').textContent,/100 MiB/);
+});
+
+test('mission permanently deletes the selected satellite after explicit confirmation',async()=>{
+ const h=await missionHarness('active'),deleting=h.node('deleteRecord').onclick();h.deleteRequests[0].resolve();await deleting;
+ assert.equal(h.confirmations.length,1);assert.match(h.confirmations[0],/永久删除/);assert.match(h.confirmations[0],/无法恢复/);
+ assert.equal(h.deleteRequests.length,1);assert.equal(h.deleteRequests[0].options.method,'DELETE');
+ assert.equal(h.node('detail').hidden,true);assert.match(h.node('notice').textContent,/已永久删除/);
+});
+
+test('a confirmed deletion still clears the record if replay opens before the response arrives',async()=>{
+ const h=await missionHarness('active'),deleting=h.node('deleteRecord').onclick();
+ const historyLoad=h.node('history').onclick();assert.equal(h.requests.length,1);
+ h.deleteRequests[0].resolve();await deleting;
+ assert.equal(h.node('detail').hidden,true);assert.match(h.node('notice').textContent,/已永久删除/);
+ h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:10});await historyLoad;
+ assert.equal(h.node('detail').hidden,true);
 });
 
 test('mission clamps extreme zoom requests to the observable scale and keeps distant satellites locatable',async()=>{

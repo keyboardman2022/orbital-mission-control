@@ -22,7 +22,7 @@ parentPort.on('message',({id,method,args=[]})=>{
     if(method==='model')result={model:M.MODEL,sampling:engine.samplingPolicy,server:engine.health()};
     else if(method==='close'){clearInterval(timer);engine.close();result={ok:true};}
     else {
-      const allowed=['guest','authenticate','recover','rotateRecovery','logout','launch','get','list','active','trajectory','terminate','terminateMany','prepareExport','getExport','finishExport','health'];
+      const allowed=['guest','authenticate','recover','rotateRecovery','logout','launch','get','list','active','trajectory','terminate','terminateMany','deleteSatellite','prepareExport','getExport','finishExport','health'];
       if(!allowed.includes(method))throw new Error('未知内部指令');
       result=engine[method](...args);
     }

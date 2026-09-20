@@ -5,8 +5,8 @@ const M=require('../shared/simulation.js');
 const U=require('../shared/units.js');
 const {createSampler,POLICY}=require('./trajectory-sampler.js');
 const Budget=require('./trajectory-budget.js');
-const {initializeStore,readPoints,archiveBatch}=require('./trajectory-store.js');
-const {statSync}=require('node:fs');
+const {initializeStore,readPoints,archiveBatch,archivePath}=require('./trajectory-store.js');
+const {statSync,unlinkSync}=require('node:fs');
 const hash=value=>createHash('sha256').update(String(value)).digest('hex');
 const secret=()=>randomBytes(32).toString('base64url');
 function fail(status,message){throw Object.assign(new Error(message),{status});}
@@ -215,6 +215,23 @@ class Engine{
     if(!Array.isArray(ids)||ids.length>1000||ids.some(id=>typeof id!=='string'))fail(422,'批量终止参数无效');
     const unique=[...new Set(ids)];for(const id of unique)this.owned(userId,id);
     const satellites=unique.map(id=>this.terminate(userId,id,{checkpoint:false}));this.checkpoint();return {satellites,server:this.health()};
+  }
+  deleteSatellite(userId,id){
+    this.owned(userId,id);this.checkpoint();
+    const archives=this.db.prepare('SELECT file FROM trajectory_chunks WHERE satellite_id=?').all(id).map(row=>row.file);
+    const exportIds=this.db.prepare('SELECT id FROM exports WHERE satellite_id=?').all(id).map(row=>row.id);
+    this.transaction(()=>{
+      this.db.prepare('DELETE FROM exports WHERE satellite_id=?').run(id);
+      this.db.prepare('DELETE FROM events WHERE satellite_id=?').run(id);
+      this.db.prepare('DELETE FROM points WHERE satellite_id=?').run(id);
+      this.db.prepare('DELETE FROM trajectory_chunks WHERE satellite_id=?').run(id);
+      const removed=this.db.prepare('DELETE FROM satellites WHERE id=? AND user_id=?').run(id,userId);
+      if(removed.changes!==1)fail(404,'找不到该卫星');
+    });
+    this.records.delete(id);this.samplers.delete(id);this.dirty.delete(id);
+    const archiveCleanupFailures=[];
+    for(const file of archives)try{unlinkSync(archivePath(this.filename,file));}catch(error){if(error.code!=='ENOENT')archiveCleanupFailures.push(file);}
+    return {id,exportIds,archiveCleanupFailures};
   }
   prepareExport(userId,id,format){
     if(!['csv','json'].includes(format))fail(422,'仅支持 CSV 和 JSON');

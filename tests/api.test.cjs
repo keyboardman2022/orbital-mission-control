@@ -47,4 +47,10 @@ test('HTTP launch, ownership, CSRF, persistence, pagination, recovery and export
  assert.equal((await request('/api/satellites/'+ownerOne.id,a)).data.satellite.status,'active');
  const cleared=await request('/api/satellites/terminate-many',{...a,method:'POST',body:{ids:[ownerOne.id]}});assert.equal(cleared.res.status,200);assert.equal(cleared.data.satellites[0].status,'terminated');
  assert.equal((await request('/api/satellites/'+otherOne.id,otherAuth)).data.satellite.status,'active');
+ const deletable=(await request('/api/satellites',{...a,method:'POST',body:{...initial,idempotencyKey:'delete-api-record'}})).data.satellite;
+ assert.equal((await request('/api/satellites/'+deletable.id,{...a,csrfToken:undefined,method:'DELETE'})).res.status,403);
+ assert.equal((await request('/api/satellites/'+deletable.id,{...otherAuth,method:'DELETE'})).res.status,404);
+ const removed=await request('/api/satellites/'+deletable.id,{...a,method:'DELETE'});assert.equal(removed.res.status,200);assert.equal(removed.data.deleted.id,deletable.id);
+ assert.equal((await request('/api/satellites/'+deletable.id,a)).res.status,404);
+ assert.ok(!(await request('/api/satellites',a)).data.satellites.some(s=>s.id===deletable.id));
 });
