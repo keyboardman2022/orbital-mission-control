@@ -74,20 +74,22 @@ test('paged loader fails a nonadvancing cursor instead of looping forever',async
   assert.equal(calls,2);
 });
 
-async function missionHarness(status='terminated'){
+async function missionHarness(status='terminated',trajectoryCoverage=null){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js');
   const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],sweepRequests=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
   function node(id){if(nodes.has(id))return nodes.get(id);let value='';const handlers={};const result={id,children:[],style:{},dataset:{},checked:false,hidden:false,disabled:false,textContent:'',get value(){return value;},set value(v){value=String(v);},setAttribute(){},removeAttribute(){},addEventListener(type,fn){handlers[type]=fn;},dispatch(type,event={}){handlers[type]?.(event);},after(){},remove(){},append(...items){this.children.push(...items);},querySelector(selector){return node(id+selector);},getContext(){return context2d;},getBoundingClientRect(){return {width:1000,height:800,left:0,top:0};},classList:{toggle(){},add(){},remove(){}}};nodes.set(id,result);return result;}
   for(const [id,value]of Object.entries({name:'',x:units.toKm(500),y:0,massKg:1000,speed:0,directionDeg:0,rate:1}))node(id).value=value;
-  const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1}};
+  const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1},...(trajectoryCoverage?{trajectoryCoverage}:{})};
+  node('exportJson').dataset.export='json';
   const reply=data=>({ok:true,json:async()=>data});
-  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:()=>[],hidden:false},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
+  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
     if(path.includes('/trajectory?'))return new Promise(resolve=>requests.push({path,options,resolve:data=>resolve(reply(data))}));
     if(path==='/api/session/guest')return reply({user:{id:'user'},csrfToken:'token'});
     if(path==='/api/model')return reply({model:model.MODEL,server:{tick:1}});
     if(path==='/api/satellites')return reply({satellites:[satellite],server:{tick:1},nextCursor:null});
     if(path==='/api/satellites/active')return reply({satellites:[satellite],server:{tick:1}});
     if(path==='/api/satellites/terminate-many'){sweepRequests.push(JSON.parse(options.body));return reply({satellites:[{...satellite,status:'terminated'}]});}
+    if(path==='/api/satellites/one/exports')return reply({export:{id:'export-one',format:'json',status:'ready',cutoffTick:trajectoryCoverage?.endTick??satellite.state.tick,trajectoryCoverage}});
     return reply({satellite});
   }};
   vm.runInNewContext(fs.readFileSync(require.resolve('../mission.js'),'utf8'),sandbox);
@@ -97,6 +99,25 @@ async function missionHarness(status='terminated'){
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
+
+test('mission discloses a capped trajectory and limits replay and export to its coverage',async()=>{
+ const coverage={status:'capped',estimatedBytes:104857600,limitBytes:104857600,estimatedBytesPerPoint:256,maxPoints:409600,lastSeq:409600,endTick:120000,endElapsedSeconds:500,truncated:true};
+ const h=await missionHarness('active',coverage);
+ assert.match(h.node('detailMeta').textContent,/轨迹记录已达约 100 MiB 上限/);
+ assert.match(h.node('satellites').children[0].children[1].textContent,/轨迹已截断/);
+ const loading=h.node('history').onclick();h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:coverage.lastSeq,trajectoryCoverage:coverage});await loading;
+ assert.equal(Number(h.node('timeline').max),coverage.endElapsedSeconds);
+ assert.match(h.node('historyMessage').textContent,/轨迹仅记录到存储上限/);
+ await h.node('exportJson').onclick();assert.match(h.node('historyMessage').textContent,/轨迹导出已就绪/);assert.match(h.node('historyMessage').textContent,/轨迹已截断/);
+});
+
+test('recording trajectory keeps the lifecycle replay endpoint',async()=>{
+ const coverage={status:'recording',estimatedBytes:2560,limitBytes:104857600,estimatedBytesPerPoint:256,maxPoints:409600,lastSeq:10,endTick:216000,endElapsedSeconds:900,truncated:false};
+ const h=await missionHarness('terminated',coverage),loading=h.node('history').onclick();
+ h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:10,trajectoryCoverage:coverage});await loading;
+ assert.equal(Number(h.node('timeline').max),h.satellite.state.elapsedSeconds);
+ assert.doesNotMatch(h.node('detailMeta').textContent,/100 MiB/);
+});
 
 test('mission clamps extreme zoom requests to the observable scale and keeps distant satellites locatable',async()=>{
  const h=await missionHarness(),U=require('../shared/units.js');

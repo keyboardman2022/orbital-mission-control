@@ -3,6 +3,7 @@
   const $ = id => document.getElementById(id), model = OrbitalModel, units=OrbitalUnits,scale=units.SCALE;
   const fields = ['name','x','y','massKg','speed','directionDeg'];
   const statusText = {queued:'排队中',active:'运行中',captured:'已捕获',escaped:'已逃逸',terminated:'已终止',out_of_observable:'超出可观测区域',error:'计算中断'};
+  const trajectoryNotice=s=>s?.trajectoryCoverage?.status==='capped'?`轨迹记录已达约 100 MiB 上限 · 记录至 ${Number(s.trajectoryCoverage.endElapsedSeconds).toFixed(3)} 模拟秒`:'';
   const canvas=$('universe'),ctx=canvas.getContext('2d'),visuals=OrbitalVisuals.create();
   const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
   let visualTime=0,liveTime=0,recovering=false,lastTelemetryTime=-1,impactWaves=[],seenCaptures=new Set(),replayCaptureShown=false;
@@ -241,6 +242,9 @@
         if(options.cursor)params.set('cursor',options.cursor);if(options.cutoffSeq!==undefined)params.set('cutoffSeq',String(options.cutoffSeq));
         const data=await api('/api/satellites/'+encodeURIComponent(id)+'/trajectory?'+params,{signal});
         if(!current())throw new DOMException('History request replaced','AbortError');
+        if(data.trajectoryCoverage?.status==='capped'){
+          historySnapshot.trajectoryCoverage={...data.trajectoryCoverage};historySnapshot.tick=data.trajectoryCoverage.endTick;historySnapshot.elapsedSeconds=data.trajectoryCoverage.endElapsedSeconds;$('timeline').max=data.trajectoryCoverage.endElapsedSeconds;
+        }
         if(historyCutoffSeq===undefined){if(!Number.isSafeInteger(data.cutoffSeq))throw new Error('历史读取缺少固定截止标记');historyCutoffSeq=data.cutoffSeq;}
         return data;
       },{targetTick:replayElapsed*model.MODEL.tickRate,cutoffSeq:historyCutoffSeq});
@@ -248,7 +252,7 @@
       historyCutoffSeq=result.cutoffSeq;historyCache.set(result.range,result.points);historyPoints=historyCache.points;
       if(!historyCache.contains(replayElapsed))throw new Error('此时刻尚无可插值的已归档采样点，请稍后重新加载历史。');
       playing=historyResume;historyResume=false;$('play').textContent=playing?'暂停':'播放';
-      $('historyMessage').textContent=`当前窗口 ${historyPoints.length} 个采样点 · 截止 tick ${historySnapshot.tick}。拖动完整时间轴按需读取历史，回放位置在相邻采样点间插值。`;updateReplayLabel();return true;
+      $('historyMessage').textContent=`当前窗口 ${historyPoints.length} 个采样点 · 截止 tick ${historySnapshot.tick}。拖动完整时间轴按需读取历史，回放位置在相邻采样点间插值。${historySnapshot.trajectoryCoverage?.status==='capped'?' 轨迹仅记录到存储上限。':''}`;updateReplayLabel();return true;
     }catch(e){if(current()){playing=false;historyResume=false;$('play').textContent='播放';$('historyMessage').textContent=e.message;}return false;}
     finally{if(current()){historyLoading=false;$('history').disabled=false;}}
   }
@@ -329,12 +333,12 @@
       const className='satellite'+(s.id===selectedId?' selected':'');if(node.button.className!==className)node.button.className=className;
       if(node.title.textContent!==s.name)node.title.textContent=s.name;
       const state=observedPosition(s.id)||s.state,shown=displayStates.get(s.id)||s;
-      const text=`${statusText[shown.status]||shown.status} · ${(state?.elapsedSeconds||0).toFixed(2)} 模拟秒 · ${['active','queued'].includes(shown.status)?'当前':'末态'}速度 ${units.formatSpeed(state,s.calibration||scale)}${recovering?' · 预演':''}`;if(node.meta.textContent!==text)node.meta.textContent=text;
+      const text=`${statusText[shown.status]||shown.status} · ${(state?.elapsedSeconds||0).toFixed(2)} 模拟秒 · ${['active','queued'].includes(shown.status)?'当前':'末态'}速度 ${units.formatSpeed(state,s.calibration||scale)}${s.trajectoryCoverage?.status==='capped'?' · 轨迹已截断':''}${recovering?' · 预演':''}`;if(node.meta.textContent!==text)node.meta.textContent=text;
     }
   }
   function renderDetail(){const s=satellites.get(selectedId);$('fitSelected').disabled=!s;$('trackSelected').disabled=!s;if(!s)return;$('detail').hidden=false;$('detailName').textContent=s.name;
     const state=observedPosition(selectedId)||s.state,t=units.telemetry(state,s.calibration||scale),shown=displayStates.get(selectedId)||s;
-    $('detailMeta').textContent=`${s.id} · ${statusText[shown.status]||shown.status} · ${(state?.elapsedSeconds||0).toFixed(3)} 模拟秒 · 对应 ${t.physicalElapsedSeconds.toPrecision(4)} s 模型物理时间 · ${s.massKg} kg · ${s.initial.dynamicsVersion?'独立双体质量计算':'历史测试粒子模型'}${recovering?' · 补算期间的物理预演，正式记录以后台为准':''}`;
+    $('detailMeta').textContent=`${s.id} · ${statusText[shown.status]||shown.status} · ${(state?.elapsedSeconds||0).toFixed(3)} 模拟秒 · 对应 ${t.physicalElapsedSeconds.toPrecision(4)} s 模型物理时间 · ${s.massKg} kg · ${s.initial.dynamicsVersion?'独立双体质量计算':'历史测试粒子模型'}${trajectoryNotice(s)?' · '+trajectoryNotice(s):''}${recovering?' · 补算期间的物理预演，正式记录以后台为准':''}`;
     $('detailSpeed').textContent=`初速度 ${units.toKmS(s.initial.speed,s.calibration||scale).toLocaleString('zh-CN',{maximumFractionDigits:2})} km/s · ${shown.status==='active'?'当前':'末态'}速度 ${units.formatSpeed(state,s.calibration||scale)}${t.physicalSpeedValid?` · vx ≈ ${t.vxKmS.toFixed(2)}，vy ≈ ${t.vyKmS.toFixed(2)} km/s · ${(t.fractionOfC*100).toFixed(2)}% c`:` · 模型给出 ${t.speedKmS.toFixed(2)} km/s，不能作为真实速度`}${s.calibrationInferred?' · 历史场景记录按示例质量换算':''}`;
     $('terminate').disabled=!['active','queued'].includes(s.status)||!online;}
   async function selectSatellite(id){clearHistory();selectedId=id;setTracking(true);selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);historyPoints=[];historyMode=false;playing=false;impactWaves=[];replayCaptureShown=false;$('replay').hidden=true;$('downloadExport').hidden=true;$('historyMessage').textContent='';$('viewMode').textContent=paused?'观察已暂停 · 服务继续运行':'实时观察';hiddenLive=false;if(online&&sessionReady)openStream();renderList();renderDetail();const epoch=selectionEpoch;try{const data=await api('/api/satellites/'+encodeURIComponent(id));if(epoch===selectionEpoch)ingest([data.satellite]);}catch(e){if(epoch===selectionEpoch)message(e.message);}}
@@ -348,7 +352,9 @@
   $('history').onclick=async()=>{
     const s=satellites.get(selectedId);if(!s)return;
     if(!Number.isFinite(s.state?.tick)){$('historyMessage').textContent='卫星尚未出生，请等待正式状态。';return;}
-    clearHistory();selectionEpoch++;historySnapshot={...s.state};historyMode=true;hiddenLive=false;playing=false;impactWaves=[];replayCaptureShown=false;
+    clearHistory();selectionEpoch++;historySnapshot={...s.state};
+    if(s.trajectoryCoverage?.status==='capped'){historySnapshot.trajectoryCoverage={...s.trajectoryCoverage};historySnapshot.tick=s.trajectoryCoverage.endTick;historySnapshot.elapsedSeconds=s.trajectoryCoverage.endElapsedSeconds;historyCutoffSeq=s.trajectoryCoverage.lastSeq;}
+    historyMode=true;hiddenLive=false;playing=false;impactWaves=[];replayCaptureShown=false;
     const life=history.lifecycle(historySnapshot,model.MODEL.tickRate);$('timeline').min=0;$('timeline').max=life.endSeconds;$('timeline').value=0;$('replay').hidden=false;$('viewMode').textContent='历史回放';
     await requestHistory(0);
   };
@@ -362,7 +368,7 @@
   };
   $('live').onclick=()=>{clearHistory();selectionEpoch++;historyMode=false;playing=false;hiddenLive=false;$('replay').hidden=true;$('viewMode').textContent=paused?'观察已暂停':'实时观察';};
   document.querySelectorAll('[data-export]').forEach(button=>button.onclick=async()=>{const id=selectedId,epoch=++exportEpoch;if(!id)return;$('downloadExport').hidden=true;$('historyMessage').textContent='正在创建导出任务…';try{const data=await api('/api/satellites/'+encodeURIComponent(id)+'/exports',{method:'POST',body:JSON.stringify({format:button.dataset.export})});if(epoch!==exportEpoch)return;pollExport(data.export,epoch);}catch(e){if(epoch===exportEpoch)$('historyMessage').textContent=e.message;}});
-  async function pollExport(job,epoch){if(epoch!==exportEpoch)return;if(job.status==='ready'||job.status==='completed'){const link=$('downloadExport');link.href=job.downloadUrl||'/api/exports/'+encodeURIComponent(job.id)+'/download';link.textContent='下载 '+(job.format||'')+' 文件';link.hidden=false;$('historyMessage').textContent='完整记录导出已就绪 · 截止 tick '+job.cutoffTick;return;}if(job.status==='error'||job.status==='failed'){$('historyMessage').textContent='导出失败：'+(job.message||job.error||job.errorMessage||'请重试');return;}$('historyMessage').textContent='服务器正在生成完整记录导出…';exportTimer=setTimeout(async()=>{try{const data=await api('/api/exports/'+encodeURIComponent(job.id));pollExport(data.export,epoch);}catch(e){if(epoch===exportEpoch)$('historyMessage').textContent=e.message;}},1500);}
+  async function pollExport(job,epoch){if(epoch!==exportEpoch)return;if(job.status==='ready'||job.status==='completed'){const link=$('downloadExport');link.href=job.downloadUrl||'/api/exports/'+encodeURIComponent(job.id)+'/download';link.textContent='下载 '+(job.format||'')+' 文件';link.hidden=false;const capped=job.trajectoryCoverage?.status==='capped'||satellites.get(selectedId)?.trajectoryCoverage?.status==='capped';$('historyMessage').textContent='轨迹导出已就绪 · 截止 tick '+job.cutoffTick+(capped?' · 轨迹已截断于存储上限':'');return;}if(job.status==='error'||job.status==='failed'){$('historyMessage').textContent='导出失败：'+(job.message||job.error||job.errorMessage||'请重试');return;}$('historyMessage').textContent='服务器正在生成轨迹导出…';exportTimer=setTimeout(async()=>{try{const data=await api('/api/exports/'+encodeURIComponent(job.id));pollExport(data.export,epoch);}catch(e){if(epoch===exportEpoch)$('historyMessage').textContent=e.message;}},1500);}
   $('physicalScale').textContent=`黑洞质量：${scale.centralMassSolar} M☉ ≈ ${units.centralMassKg.toExponential(4)} kg · 视界半径 r_s = ${units.formatKm(scale.schwarzschildRadiusKm)}。1 现实秒推进约 ${scale.secondsPerUnit.toPrecision(5)} s 模型物理时间，相当于慢放约 ${(1/scale.secondsPerUnit).toFixed(0)} 倍。`;
   $('observationRange').textContent=`可观测区域半径：${units.formatKm(units.toKm(OBSERVATION_RADIUS))}，等于恒速冲击波 ${model.MODEL.observation.sweepSeconds} 秒的传播距离。黑洞居中时可缩小至区域边界；卫星越界后移除并归档为“超出可观测区域”，仍可回放和导出。这是观察范围，不是引力边界。`;
   $('launchLimits').textContent=`当前模拟允许出生半径 ${units.formatKm(units.toKm(80))}–${units.formatKm(units.toKm(model.MODEL.limits.maxRadius))}；初速度小于 299792.458 km/s`;
