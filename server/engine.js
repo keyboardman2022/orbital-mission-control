@@ -93,7 +93,7 @@ class Engine{
     if(!row||row.user_id!==userId)fail(404,'找不到该卫星');
     return this.records.get(id)||JSON.parse(row.record);
   }
-  publicRecord(r){const {ownerId,seq,lastSample,eventSeq,requestHash,...result}=r;return structuredClone({...result,
+  publicRecord(r){const {ownerId,seq,lastSample,eventSeq,requestHash,trajectoryBudget,...result}=r;return structuredClone({...result,
     calibration:r.initial.calibration||U.SCALE,calibrationInferred:!r.initial.calibration,
     telemetry:U.telemetry(r.state,r.initial.calibration||U.SCALE),trajectoryCoverage:Budget.coverage(r)});}
   get(userId,id){return this.publicRecord(this.owned(userId,id));}
@@ -196,7 +196,8 @@ class Engine{
     const r=this.owned(userId,id);if(query.cutoffSeq===undefined)this.checkpoint();
     const trajectoryCoverage=Budget.coverage(r),after=integer(query.cursor,0),count=integer(query.limit,1000,1,5000);
     const requestedFrom=integer(query.fromTick,0),requestedTo=integer(query.toTick,trajectoryCoverage.endTick);
-    if(requestedFrom>requestedTo)fail(422,'起始时间不能晚于截止时间');
+    const explicitTo=query.toTick!==undefined&&query.toTick!==null&&query.toTick!=='';
+    if(explicitTo&&requestedFrom>requestedTo)fail(422,'起始时间不能晚于截止时间');
     const to=Math.min(requestedTo,trajectoryCoverage.endTick),from=Math.min(requestedFrom,to);
     const cutoffSeq=integer(query.cutoffSeq,trajectoryCoverage.lastSeq,0,trajectoryCoverage.lastSeq),boundaries=query.boundaries==='1'||query.boundaries===true;
     const rows=readPoints(this.db,this.filename,{id,after,fromTick:from,toTick:to,cutoffSeq,limit:count+1,boundaries});

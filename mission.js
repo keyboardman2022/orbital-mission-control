@@ -243,7 +243,7 @@
         const data=await api('/api/satellites/'+encodeURIComponent(id)+'/trajectory?'+params,{signal});
         if(!current())throw new DOMException('History request replaced','AbortError');
         if(data.trajectoryCoverage?.status==='capped'){
-          historySnapshot.trajectoryCoverage={...data.trajectoryCoverage};historySnapshot.tick=data.trajectoryCoverage.endTick;historySnapshot.elapsedSeconds=data.trajectoryCoverage.endElapsedSeconds;$('timeline').max=data.trajectoryCoverage.endElapsedSeconds;
+          historySnapshot.trajectoryCoverage={...data.trajectoryCoverage};historySnapshot.tick=data.trajectoryCoverage.endTick;historySnapshot.elapsedSeconds=data.trajectoryCoverage.endElapsedSeconds;replayElapsed=Math.min(replayElapsed,data.trajectoryCoverage.endElapsedSeconds);$('timeline').max=data.trajectoryCoverage.endElapsedSeconds;$('timeline').value=replayElapsed;
         }
         if(historyCutoffSeq===undefined){if(!Number.isSafeInteger(data.cutoffSeq))throw new Error('历史读取缺少固定截止标记');historyCutoffSeq=data.cutoffSeq;}
         return data;

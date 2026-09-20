@@ -29,6 +29,14 @@ test('production trajectory policy represents one hundred MiB',()=>{
   assert.throws(()=>Budget.createPolicy(0),/positive safe integer/);
 });
 
+test('legacy history already beyond the limit remains readable but cannot grow',()=>{
+  const record={seq:4,lastSample:{seq:4,tick:40,elapsedSeconds:4},state:{tick:50,elapsedSeconds:5}};
+  Budget.ensure(record,Budget.createPolicy(3));const coverage=Budget.coverage(record);
+  assert.equal(coverage.status,'capped');assert.equal(coverage.lastSeq,4);
+  assert.equal(coverage.endTick,40);assert.equal(coverage.estimatedBytes,1024);
+  assert.equal(Budget.admit(record,{tick:60,elapsedSeconds:6}),false);
+});
+
 test('a multi-point sampler flush caps exactly at the third retained point',t=>{
   const f=fixture(t,{trajectoryMaxPoints:3}),e=f.engine;
   e.advanceTo(960);e.checkpoint();
@@ -86,6 +94,9 @@ test('capped query and exports stop at coverage while current state continues',a
   const history=e.trajectory(f.user,id,{fromTick:0,toTick:Number.MAX_SAFE_INTEGER,limit:100});
   assert.equal(history.cutoffTick,capped.endTick);assert.deepEqual(history.trajectoryCoverage,capped);
   assert.equal(history.points.at(-1).seq,capped.lastSeq);
+  const beyond=e.trajectory(f.user,id,{fromTick:capped.endTick+100,limit:100});
+  assert.equal(beyond.cutoffTick,capped.endTick);assert.equal(beyond.points.at(-1).seq,capped.lastSeq);
+  assert.equal(Object.hasOwn(e.get(f.user,id),'trajectoryBudget'),false);
   const jsonRecord=e.prepareExport(f.user,id,'json');
   assert.equal(jsonRecord.cutoffTick,capped.endTick);assert.equal(jsonRecord.cutoffSeq,capped.lastSeq);
   assert.equal(jsonRecord.trajectoryCoverage.truncated,true);

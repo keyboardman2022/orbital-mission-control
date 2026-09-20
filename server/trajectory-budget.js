@@ -42,7 +42,7 @@ function admit(record,point){
   return true;
 }
 function coverage(record){
-  const budget=ensure(record),end=budget.status==='capped'?budget.cappedAt:endpoint(record),lastSeq=Math.min(record.seq||0,budget.maxPoints);
+  const budget=ensure(record),end=budget.status==='capped'?budget.cappedAt:endpoint(record),lastSeq=Math.max(0,Number(record.seq)||0);
   return {status:budget.status,estimatedBytes:lastSeq*budget.estimatedBytesPerPoint,limitBytes:budget.limitBytes,
     estimatedBytesPerPoint:budget.estimatedBytesPerPoint,maxPoints:budget.maxPoints,lastSeq,
     endTick:end.tick,endElapsedSeconds:end.elapsedSeconds,truncated:budget.status==='capped'};
