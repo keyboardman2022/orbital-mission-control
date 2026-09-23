@@ -73,6 +73,28 @@
       range={fromTick,toTick:fromTick+nextSpan};
     }
   }
+  async function loadExact(fetchPage,{cutoffSeq,maxPoints=409600,pageSize=5000,signal,onPage=()=>{}}={}){
+    if(!Number.isSafeInteger(cutoffSeq)||cutoffSeq<0)throw new Error('完整历史读取缺少固定截止标记');
+    if(!Number.isSafeInteger(maxPoints)||maxPoints<1||maxPoints>409600)throw new Error('完整历史点上限无效');
+    if(!Number.isSafeInteger(pageSize)||pageSize<1||pageSize>5000)throw new Error('完整历史分页大小无效');
+    let cursor=null,pointCount=0,lastSeq=null;const cursors=new Set();
+    for(;;){
+      if(signal?.aborted)throw new DOMException('历史读取已取消','AbortError');
+      const remaining=maxPoints-pointCount;if(remaining<=0)throw new Error('完整历史超过 409600 点上限');
+      const data=await fetchPage({cursor,cutoffSeq,limit:Math.min(pageSize,remaining),boundaries:false,signal});
+      if(data.cutoffSeq!==cutoffSeq)throw new Error('完整历史截止标记发生变化');
+      const points=data.points||[];
+      for(const point of points){
+        if(!Number.isSafeInteger(point.seq)||(lastSeq!==null&&point.seq<=lastSeq))throw new Error('完整历史序号必须严格递增');
+        lastSeq=point.seq;
+      }
+      pointCount+=points.length;const nextCursor=data.nextCursor||null;
+      onPage(points,{pointCount,cutoffSeq,nextCursor,trajectoryCoverage:data.trajectoryCoverage});
+      if(!nextCursor)return {pointCount,cutoffSeq,lastCursor:null};
+      if(nextCursor===cursor||cursors.has(nextCursor)||points.length===0)throw new Error('完整历史游标没有推进');
+      cursors.add(nextCursor);cursor=nextCursor;
+    }
+  }
   function mergeSnapshot(old,incoming){return old?{...old,...incoming}:incoming.initial?incoming:null;}
   // Reconstruct only short live intervals using the server's fixed-step dynamics.
   // A long offline catch-up cannot be inferred from two endpoints.
@@ -108,5 +130,5 @@
       }
     };
   }
-  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,createTrail,loadWindow,mergeSnapshot,liveSegment,createLiveObserver};
+  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,createTrail,loadWindow,loadExact,mergeSnapshot,liveSegment,createLiveObserver};
 });

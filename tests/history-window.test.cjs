@@ -97,6 +97,31 @@ test('paged loader fails a nonadvancing cursor instead of looping forever',async
   assert.equal(calls,2);
 });
 
+const exactPoints=(from,count)=>Array.from({length:count},(_,i)=>({seq:from+i,tick:(from+i)*240,elapsedSeconds:from+i,x:500+i,y:i}));
+
+test('loadExact pins cutoff and streams every page once',async()=>{
+  const calls=[],pages=[];
+  const result=await history.loadExact(async options=>{
+    calls.push(options);
+    if(options.cursor===null)return {points:exactPoints(1,2),nextCursor:'2',cutoffSeq:9};
+    return {points:exactPoints(3,2),nextCursor:null,cutoffSeq:9};
+  },{cutoffSeq:9,maxPoints:20,pageSize:5000,onPage:(points,meta)=>pages.push({points,meta})});
+  assert.deepEqual(calls.map(c=>[c.cursor,c.cutoffSeq,c.limit]),[[null,9,20],['2',9,18]]);
+  assert.equal(result.pointCount,4);assert.equal(pages.length,2);
+});
+
+test('loadExact rejects nonadvancing cursor, duplicate sequence and changed cutoff',async()=>{
+  await assert.rejects(history.loadExact(async()=>({points:exactPoints(1,1),nextCursor:'same',cutoffSeq:8}),{cutoffSeq:9}),/截止/);
+  let n=0;await assert.rejects(history.loadExact(async()=>++n===1?{points:exactPoints(1,1),nextCursor:'same',cutoffSeq:9}:{points:exactPoints(2,1),nextCursor:'same',cutoffSeq:9},{cutoffSeq:9}),/游标|cursor/i);
+  n=0;await assert.rejects(history.loadExact(async()=>++n===1?{points:exactPoints(1,2),nextCursor:'2',cutoffSeq:9}:{points:exactPoints(2,1),nextCursor:null,cutoffSeq:9},{cutoffSeq:9}),/序号/);
+});
+
+test('loadExact stops before dispatch when aborted',async()=>{
+  const controller=new AbortController();controller.abort();let calls=0;
+  await assert.rejects(history.loadExact(async()=>{calls++;return {points:[],nextCursor:null,cutoffSeq:9};},{cutoffSeq:9,signal:controller.signal}),error=>error.name==='AbortError');
+  assert.equal(calls,0);
+});
+
 async function missionHarness(status='terminated',trajectoryCoverage=null){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js');
   const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],sweepRequests=[],deleteRequests=[],confirmations=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
