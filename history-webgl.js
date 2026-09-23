@@ -2,10 +2,24 @@
 (function(root,factory){if(typeof module==='object'&&module.exports)module.exports=factory();else root.OrbitalHistoryGL=factory();})(typeof globalThis!=='undefined'?globalThis:this,function(){
   const HARD_MAX_POINTS=409600;
   const finiteKeys=['tick','elapsedSeconds','x','y'];
+  const ANGLE=-.48,TILT=.66,COS=Math.cos(ANGLE),SIN=Math.sin(ANGLE);
+  const VERTEX=`attribute vec2 aHigh;attribute vec2 aLow;uniform vec2 uOriginHigh;uniform vec2 uOriginLow;uniform vec2 uViewport;uniform float uScale;const float C=0.8869949227792842;const float S=-0.4617791755414829;const float T=0.66;void main(){vec2 p=(aHigh-uOriginHigh)+(aLow-uOriginLow);vec2 screen=uViewport*.5+uScale*vec2(p.x*C-p.y*T*S,p.x*S+p.y*T*C);vec2 clip=screen/uViewport*2.0-1.0;gl_Position=vec4(clip.x,-clip.y,0.0,1.0);}`;
+  const FRAGMENT=`precision mediump float;void main(){gl_FragColor=vec4(0.643,0.859,0.651,0.52);}`;
 
   function split64(value){
     const high=Math.fround(value);
     return {high,low:value-high};
+  }
+
+  function worldOrigin(view,width,height){
+    const dx=width*.5-view.cx,dy=height*.5-view.cy;
+    return {x:split64((dx*COS+dy*SIN)/view.scale),y:split64((-dx*SIN+dy*COS)/(view.scale*TILT))};
+  }
+
+  function projectSplit(point,view,width,height){
+    const px=split64(point.x),py=split64(-point.y),origin=worldOrigin(view,width,height);
+    const x=(px.high-origin.x.high)+(px.low-origin.x.low),y=(py.high-origin.y.high)+(py.low-origin.y.low);
+    return {x:width*.5+view.scale*(x*COS-y*TILT*SIN),y:height*.5+view.scale*(x*SIN+y*TILT*COS)};
   }
 
   function createStore({maxPoints=HARD_MAX_POINTS}={}){
@@ -73,5 +87,86 @@
     return store;
   }
 
-  return {HARD_MAX_POINTS,split64,createStore};
+  function createRenderer(canvas,{maxPoints=HARD_MAX_POINTS,onStatus=()=>{}}={}){
+    if(!Number.isSafeInteger(maxPoints)||maxPoints<1||maxPoints>HARD_MAX_POINTS)throw new Error('历史点上限无效');
+    let gl=null,program=null,highBuffer=null,lowBuffer=null,locations=null,chunks=[],lost=false,destroyed=false,available=false;
+
+    function disposeGPU(){
+      if(gl){if(highBuffer)gl.deleteBuffer(highBuffer);if(lowBuffer)gl.deleteBuffer(lowBuffer);if(program)gl.deleteProgram(program);}
+      highBuffer=null;lowBuffer=null;program=null;locations=null;
+    }
+    function shader(type,source){
+      const out=gl.createShader(type);gl.shaderSource(out,source);gl.compileShader(out);
+      if(!gl.getShaderParameter(out,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(out)||'轨迹着色器编译失败');
+      return out;
+    }
+    function initialize(){
+      gl=canvas.getContext('webgl',{alpha:true,antialias:true,premultipliedAlpha:true,preserveDrawingBuffer:false});
+      if(!gl)return false;
+      const vertex=shader(gl.VERTEX_SHADER,VERTEX),fragment=shader(gl.FRAGMENT_SHADER,FRAGMENT),next=gl.createProgram();
+      gl.attachShader(next,vertex);gl.attachShader(next,fragment);gl.linkProgram(next);
+      if(!gl.getProgramParameter(next,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(next)||'轨迹着色器链接失败');
+      program=next;locations={high:gl.getAttribLocation(program,'aHigh'),low:gl.getAttribLocation(program,'aLow'),originHigh:gl.getUniformLocation(program,'uOriginHigh'),originLow:gl.getUniformLocation(program,'uOriginLow'),viewport:gl.getUniformLocation(program,'uViewport'),scale:gl.getUniformLocation(program,'uScale')};
+      gl.useProgram(program);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+      return true;
+    }
+    function ensureBuffers(){
+      if(highBuffer&&lowBuffer)return;
+      const bytes=maxPoints*2*Float32Array.BYTES_PER_ELEMENT;
+      highBuffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,highBuffer);gl.bufferData(gl.ARRAY_BUFFER,bytes,gl.DYNAMIC_DRAW);
+      lowBuffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,lowBuffer);gl.bufferData(gl.ARRAY_BUFFER,bytes,gl.DYNAMIC_DRAW);
+    }
+    function encoded(chunk){
+      const high=new Float32Array(chunk.length*2),low=new Float32Array(chunk.length*2);
+      for(let i=0;i<chunk.length;i++){
+        const x=split64(chunk.x[i]),y=split64(-chunk.y[i]),at=i*2;
+        high[at]=x.high;high[at+1]=y.high;low[at]=x.low;low[at+1]=y.low;
+      }
+      return {high,low};
+    }
+    function upload(chunk){
+      ensureBuffers();const data=encoded(chunk),offset=chunk.base*2*Float32Array.BYTES_PER_ELEMENT;
+      gl.bindBuffer(gl.ARRAY_BUFFER,highBuffer);gl.bufferSubData(gl.ARRAY_BUFFER,offset,data.high);
+      gl.bindBuffer(gl.ARRAY_BUFFER,lowBuffer);gl.bufferSubData(gl.ARRAY_BUFFER,offset,data.low);
+    }
+    function restore(){
+      if(destroyed)return;
+      disposeGPU();gl=null;
+      try{
+        if(!initialize()){available=false;lost=false;onStatus('restore-failed');return;}
+        lost=false;available=true;for(const chunk of chunks)upload(chunk);onStatus('restored');
+      }catch{
+        disposeGPU();available=false;lost=false;onStatus('restore-failed');
+      }
+    }
+    function contextLost(event){event.preventDefault();lost=true;onStatus('lost');}
+    canvas.addEventListener('webglcontextlost',contextLost);
+    canvas.addEventListener('webglcontextrestored',restore);
+    try{
+      if(initialize())available=true;else onStatus('unavailable');
+    }catch{
+      disposeGPU();available=false;onStatus('error');
+    }
+
+    return {
+      append(chunk){if(!chunk)return;if(chunk.base+chunk.length>maxPoints)throw new Error(`历史点超过 ${maxPoints} 上限`);chunks.push(chunk);if(available&&!lost)upload(chunk);},
+      render({view,width,height,dpr=1,hidden=false,segments=[]}){
+        if(destroyed||hidden||lost||!available||!view||width<=0||height<=0)return false;
+        const pixelWidth=Math.max(1,Math.round(width*dpr)),pixelHeight=Math.max(1,Math.round(height*dpr));
+        if(canvas.width!==pixelWidth)canvas.width=pixelWidth;if(canvas.height!==pixelHeight)canvas.height=pixelHeight;
+        gl.viewport(0,0,pixelWidth,pixelHeight);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(program);
+        const origin=worldOrigin(view,width,height);
+        gl.uniform2f(locations.originHigh,origin.x.high,origin.y.high);gl.uniform2f(locations.originLow,origin.x.low,origin.y.low);gl.uniform2f(locations.viewport,width,height);gl.uniform1f(locations.scale,view.scale);
+        gl.bindBuffer(gl.ARRAY_BUFFER,highBuffer);gl.enableVertexAttribArray(locations.high);gl.vertexAttribPointer(locations.high,2,gl.FLOAT,false,0,0);
+        gl.bindBuffer(gl.ARRAY_BUFFER,lowBuffer);gl.enableVertexAttribArray(locations.low);gl.vertexAttribPointer(locations.low,2,gl.FLOAT,false,0,0);
+        for(const segment of segments)if(segment.count>1)gl.drawArrays(gl.LINE_STRIP,segment.start,segment.count);
+        return true;
+      },
+      clear(){chunks=[];if(gl){if(highBuffer)gl.deleteBuffer(highBuffer);if(lowBuffer)gl.deleteBuffer(lowBuffer);}highBuffer=null;lowBuffer=null;},
+      destroy(){if(destroyed)return;destroyed=true;canvas.removeEventListener('webglcontextlost',contextLost);canvas.removeEventListener('webglcontextrestored',restore);disposeGPU();chunks=[];available=false;},
+      get available(){return available&&!destroyed;}
+    };
+  }
+
+  return {HARD_MAX_POINTS,split64,projectSplit,createStore,createRenderer};
 });
