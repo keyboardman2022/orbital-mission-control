@@ -122,15 +122,18 @@ test('loadExact stops before dispatch when aborted',async()=>{
   assert.equal(calls,0);
 });
 
-async function missionHarness(status='terminated',trajectoryCoverage=null){
+async function missionHarness(status='terminated',trajectoryCoverage=null,{webglAvailable=true}={}){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js');
   const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],sweepRequests=[],deleteRequests=[],confirmations=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
+  const exact={pages:[],renders:[],clearCount:0,destroyCount:0};
+  const exactStore={pointCount:0,append(points){this.pointCount+=points.length;exact.pages.push(points);return {base:this.pointCount-points.length,length:points.length};},visibleRanges(){return this.pointCount>1?[{start:0,count:this.pointCount}]:[];},clear(){this.pointCount=0;}};
+  const OrbitalHistoryGL={HARD_MAX_POINTS:409600,createStore:()=>exactStore,createRenderer:()=>({available:webglAvailable,append(){},render(input){exact.renders.push(input);return true;},clear(){exact.clearCount++;},destroy(){exact.destroyCount++;}})};
   function node(id){if(nodes.has(id))return nodes.get(id);let value='';const handlers={};const result={id,children:[],style:{},dataset:{},checked:false,hidden:false,disabled:false,textContent:'',get value(){return value;},set value(v){value=String(v);},setAttribute(){},removeAttribute(){},addEventListener(type,fn){handlers[type]=fn;},dispatch(type,event={}){handlers[type]?.(event);},after(){},remove(){},append(...items){this.children.push(...items);},querySelector(selector){return node(id+selector);},getContext(){return context2d;},getBoundingClientRect(){return {width:1000,height:800,left:0,top:0};},classList:{toggle(){},add(){},remove(){}}};nodes.set(id,result);return result;}
   for(const [id,value]of Object.entries({name:'',x:units.toKm(500),y:0,massKg:1000,speed:0,directionDeg:0,rate:1}))node(id).value=value;
   const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1},...(trajectoryCoverage?{trajectoryCoverage}:{})};
   node('exportJson').dataset.export='json';
   const reply=data=>({ok:true,json:async()=>data});
-  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},confirm:text=>{confirmations.push(text);return true;},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
+  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalHistoryGL,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},confirm:text=>{confirmations.push(text);return true;},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
     if(path.includes('/trajectory?'))return new Promise(resolve=>requests.push({path,options,resolve:data=>resolve(reply(data))}));
     if(path==='/api/session/guest')return reply({user:{id:'user'},csrfToken:'token'});
     if(path==='/api/model')return reply({model:model.MODEL,server:{tick:1}});
@@ -144,10 +147,12 @@ async function missionHarness(status='terminated',trajectoryCoverage=null){
   vm.runInNewContext(fs.readFileSync(require.resolve('../mission.js'),'utf8'),sandbox);
   const flush=()=>new Promise(resolve=>setImmediate(resolve));await flush();
   await node('satellites').children[0].onclick();
-  return {node,requests,flush,frames,streams,satellite,liveRenders,liveTrails,sweepRequests,deleteRequests,confirmations};
+  return {node,requests,flush,frames,streams,satellite,liveRenders,liveTrails,sweepRequests,deleteRequests,confirmations,exact};
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
+const localRequests=h=>h.requests.filter(request=>request.path.includes('fromTick='));
+const exactRequests=h=>h.requests.filter(request=>!request.path.includes('fromTick='));
 
 test('mission discloses a capped trajectory and limits replay and export to its coverage',async()=>{
  const coverage={status:'capped',estimatedBytes:104857600,limitBytes:104857600,estimatedBytesPerPoint:256,maxPoints:409600,lastSeq:409600,endTick:120000,endElapsedSeconds:500,truncated:true};
@@ -218,22 +223,22 @@ test('mission rapid seeks abort older windows and ignore their late responses',a
   h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:500});await initial;
   h.node('timeline').value=100;h.node('timeline').oninput();
   h.node('timeline').value=500;h.node('timeline').oninput();
-  assert.equal(h.requests[1].options.signal.aborted,true);
-  assert.ok(h.requests[2].path.includes('cutoffSeq=500'));
-  h.requests[2].resolve({points:windowPoints(490,510),nextCursor:null,cutoffSeq:500});await h.flush();
+  const windows=localRequests(h);assert.equal(windows[1].options.signal.aborted,true);
+  assert.ok(windows[2].path.includes('cutoffSeq=500'));
+  windows[2].resolve({points:windowPoints(490,510),nextCursor:null,cutoffSeq:500});await h.flush();
   const message=h.node('historyMessage').textContent;
-  h.requests[1].resolve({points:windowPoints(90,110),nextCursor:null,cutoffSeq:500});await h.flush();
+  windows[1].resolve({points:windowPoints(90,110),nextCursor:null,cutoffSeq:500});await h.flush();
   assert.equal(h.node('timeline').value,'500');
   assert.equal(h.node('historyMessage').textContent,message);
-  h.node('timeline').value=501;h.node('timeline').oninput();assert.equal(h.requests.length,3);
+  h.node('timeline').value=501;h.node('timeline').oninput();assert.equal(localRequests(h).length,3);
 });
 
 test('mission leaving replay cancels requests and ignores late responses',async()=>{
   const h=await missionHarness(),initial=h.node('history').onclick();
   h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:500});await initial;
   h.node('timeline').value=500;h.node('timeline').oninput();
-  h.node('live').onclick();assert.equal(h.requests[1].options.signal.aborted,true);
-  h.requests[1].resolve({points:windowPoints(490,510),nextCursor:null,cutoffSeq:500});await h.flush();
+  const window=localRequests(h)[1];h.node('live').onclick();assert.equal(window.options.signal.aborted,true);
+  window.resolve({points:windowPoints(490,510),nextCursor:null,cutoffSeq:500});await h.flush();
   assert.equal(h.node('replay').hidden,true);
   assert.equal(h.node('viewMode').textContent,'实时观察');
 });
@@ -250,19 +255,21 @@ test('mission playback pauses while crossing a window edge and resumes after the
   const h=await missionHarness(),initial=h.node('history').onclick();
   h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:500});await initial;
   h.node('timeline').value=9.99;h.node('timeline').oninput();h.node('rate').value=100;h.node('play').onclick();
-  h.frames[0](16);assert.equal(h.requests.length,2);const pausedTime=h.node('timeline').value;
-  h.frames[1](100);assert.equal(h.node('timeline').value,pausedTime);assert.equal(h.requests.length,2);
-  h.requests[1].resolve({points:windowPoints(1,22),nextCursor:null,cutoffSeq:500});await h.flush();
+  h.frames[0](16);assert.equal(localRequests(h).length,2);const pausedTime=h.node('timeline').value;
+  h.frames[1](100);assert.equal(h.node('timeline').value,pausedTime);assert.equal(localRequests(h).length,2);
+  localRequests(h)[1].resolve({points:windowPoints(1,22),nextCursor:null,cutoffSeq:500});await h.flush();
   h.frames[2](150);assert.ok(Number(h.node('timeline').value)>Number(pausedTime));assert.equal(h.node('play').textContent,'暂停');
 });
 
-test('mission retains contiguous replay windows as one cumulative trajectory',async()=>{
+test('mission local seeks do not reset the exact trajectory store',async()=>{
   const h=await missionHarness(),initial=h.node('history').onclick();
   h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:500});await initial;
+  exactRequests(h)[0].resolve({points:exactPoints(1,2),nextCursor:null,cutoffSeq:500});await h.flush();
+  const clears=h.exact.clearCount;
   h.node('timeline').value=20;h.node('timeline').oninput();
-  h.requests[1].resolve({points:windowPoints(10,30),nextCursor:null,cutoffSeq:500});await h.flush();
-  assert.match(h.node('historyMessage').textContent,/累计保留/);
-  assert.match(h.node('historyMessage').textContent,/1 段/);
+  localRequests(h)[1].resolve({points:windowPoints(10,30),nextCursor:null,cutoffSeq:500});await h.flush();
+  assert.equal(h.exact.pages.flat().length,2);assert.equal(h.exact.clearCount,clears);
+  assert.match(h.node('historyMessage').textContent,/完整精确轨迹/);
 });
 
 test('mission switching satellites rejects a late history window and preserves patch metadata',async()=>{
@@ -270,8 +277,8 @@ test('mission switching satellites rejects a late history window and preserves p
   h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:500});await initial;
   h.node('timeline').value=500;h.node('timeline').oninput();
   h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{...h.satellite,id:'other',name:'另一颗',state:{...h.satellite.state,tick:241000}}],server:{tick:2}})});
-  await h.node('satellites').children[1].onclick();assert.equal(h.requests[1].options.signal.aborted,true);
-  h.requests[1].resolve({points:windowPoints(490,510),nextCursor:null,cutoffSeq:500});await h.flush();
+  const lateWindow=localRequests(h)[1];await h.node('satellites').children[1].onclick();assert.equal(lateWindow.options.signal.aborted,true);
+  lateWindow.resolve({points:windowPoints(490,510),nextCursor:null,cutoffSeq:500});await h.flush();
   h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{id:'other',state:{...h.satellite.state,tick:241001},status:'terminated'}],server:{tick:3}})});
   assert.equal(h.node('detailName').textContent,'另一颗');assert.ok(h.node('detailMeta').textContent.includes('1000 kg'));
   assert.equal(h.node('replay').hidden,true);assert.equal(h.node('historyMessage').textContent,'');
@@ -374,4 +381,44 @@ test('mission clear and show-all leave replay controls hidden',async()=>{
     h.node(action).onclick();
     assert.equal(h.node('replay').hidden,true);
   }
+});
+
+test('mission streams the fixed-cutoff full history independently from local cached seeks',async()=>{
+  const h=await missionHarness(),opening=h.node('history').onclick();
+  h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:20,trajectoryCoverage:{status:'recording',lastSeq:20,endTick:4800,endElapsedSeconds:20}});await h.flush();
+  assert.ok(h.requests[1].path.includes('cutoffSeq=20'));assert.ok(h.requests[1].path.includes('limit=5000'));
+  h.requests[1].resolve({points:exactPoints(1,10),nextCursor:'10',cutoffSeq:20});await h.flush();
+  h.node('timeline').value=9;h.node('timeline').oninput();
+  assert.equal(h.requests[2].options.signal.aborted,false);
+  h.requests[2].resolve({points:exactPoints(11,10),nextCursor:null,cutoffSeq:20});await h.flush();await opening;
+  assert.equal(h.exact.pages.flat().length,20);assert.match(h.node('historyMessage').textContent,/完整精确轨迹/);
+});
+
+test('leaving replay aborts exact loading and ignores a late page',async()=>{
+  const h=await missionHarness(),opening=h.node('history').onclick();
+  h.requests[0].resolve({points:windowPoints(0,2),nextCursor:null,cutoffSeq:20});await h.flush();
+  const exactRequest=h.requests[1];h.node('live').onclick();assert.equal(exactRequest.options.signal.aborted,true);
+  exactRequest.resolve({points:exactPoints(1,10),nextCursor:null,cutoffSeq:20});await h.flush();
+  assert.equal(h.exact.pages.length,0);assert.ok(h.exact.clearCount>0);await opening;
+});
+
+test('switching satellites and deleting the selected record reject late exact pages',async()=>{
+  const switched=await missionHarness(),switchOpen=switched.node('history').onclick();
+  switched.requests[0].resolve({points:windowPoints(0,2),nextCursor:null,cutoffSeq:20});await switched.flush();
+  const switchLate=switched.requests[1];
+  switched.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{...switched.satellite,id:'other',name:'另一颗'}],server:{tick:2}})});
+  await switched.node('satellites').children[1].onclick();assert.equal(switchLate.options.signal.aborted,true);
+  switchLate.resolve({points:exactPoints(1,10),nextCursor:null,cutoffSeq:20});await switched.flush();assert.equal(switched.exact.pages.length,0);await switchOpen;
+
+  const deleted=await missionHarness(),deleteOpen=deleted.node('history').onclick();
+  deleted.requests[0].resolve({points:windowPoints(0,2),nextCursor:null,cutoffSeq:20});await deleted.flush();
+  const deleteLate=deleted.requests[1],deleting=deleted.node('deleteRecord').onclick();deleted.deleteRequests[0].resolve();await deleting;
+  assert.equal(deleteLate.options.signal.aborted,true);deleteLate.resolve({points:exactPoints(1,10),nextCursor:null,cutoffSeq:20});await deleted.flush();
+  assert.equal(deleted.exact.pages.length,0);await deleteOpen;
+});
+
+test('WebGL unavailable keeps local replay and shows a clear explanation',async()=>{
+  const h=await missionHarness('active',null,{webglAvailable:false}),opening=h.node('history').onclick();
+  h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:10});await opening;
+  assert.equal(h.node('replay').hidden,false);assert.match(h.node('historyMessage').textContent,/不支持完整精确轨迹/);
 });

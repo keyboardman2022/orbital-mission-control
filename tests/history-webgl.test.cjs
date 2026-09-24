@@ -47,7 +47,7 @@ function fakeGL(){
   const calls=[];let id=0;
   return {calls,ARRAY_BUFFER:34962,DYNAMIC_DRAW:35048,FLOAT:5126,LINE_STRIP:3,COLOR_BUFFER_BIT:16384,VERTEX_SHADER:35633,FRAGMENT_SHADER:35632,COMPILE_STATUS:35713,LINK_STATUS:35714,BLEND:3042,SRC_ALPHA:770,ONE_MINUS_SRC_ALPHA:771,
     createShader:()=>({id:++id}),shaderSource(){},compileShader(){},getShaderParameter:()=>true,getShaderInfoLog:()=>'',createProgram:()=>({id:++id}),attachShader(){},linkProgram(){},getProgramParameter:()=>true,getProgramInfoLog:()=>'',getAttribLocation:(_p,n)=>n==='aHigh'?0:1,getUniformLocation:(_p,n)=>n,
-    createBuffer:()=>({id:++id}),bindBuffer(){},bufferData(...a){calls.push(['bufferData',...a]);},bufferSubData(...a){calls.push(['bufferSubData',...a]);},viewport(){},clearColor(){},clear(){},useProgram(){},enable(){},blendFunc(){},enableVertexAttribArray(){},vertexAttribPointer(){},uniform2f(...a){calls.push(['uniform2f',...a]);},uniform1f(...a){calls.push(['uniform1f',...a]);},drawArrays(...a){calls.push(['drawArrays',...a]);},deleteBuffer(){calls.push(['deleteBuffer']);},deleteProgram(){calls.push(['deleteProgram']);}};
+    createBuffer:()=>({id:++id}),bindBuffer(){},bufferData(...a){calls.push(['bufferData',...a]);},bufferSubData(...a){calls.push(['bufferSubData',...a]);},viewport(){},clearColor(){},clear(){calls.push(['clear']);},useProgram(){},enable(){},blendFunc(){},enableVertexAttribArray(){},vertexAttribPointer(...a){calls.push(['vertexAttribPointer',...a]);},uniform2f(...a){calls.push(['uniform2f',...a]);},uniform1f(...a){calls.push(['uniform1f',...a]);},drawArrays(...a){calls.push(['drawArrays',...a]);},deleteBuffer(){calls.push(['deleteBuffer']);},deleteProgram(){calls.push(['deleteProgram']);}};
 }
 function fakeCanvas(gl){const listeners={};let context=gl;return {width:0,height:0,getContext:name=>name==='webgl'?context:null,setContext:value=>context=value,addEventListener:(type,fn)=>listeners[type]=fn,removeEventListener(){},fire:(type,event={preventDefault(){}})=>listeners[type](event)};}
 
@@ -80,6 +80,13 @@ test('context loss suspends drawing and restore reuploads retained CPU chunks',(
 test('renderer reports unavailable WebGL without throwing',()=>{
   const statuses=[],renderer=historyGL.createRenderer(fakeCanvas(null),{onStatus:s=>statuses.push(s)});
   assert.equal(renderer.available,false);assert.deepEqual(statuses,['unavailable']);
+});
+
+test('renderer clears safely before the first trajectory page creates buffers',()=>{
+  const gl=fakeGL(),renderer=historyGL.createRenderer(fakeCanvas(gl),{maxPoints:20});
+  assert.equal(renderer.render({view:{cx:5,cy:5,scale:1},width:10,height:10,dpr:1,hidden:false,segments:[]}),true);
+  assert.equal(gl.calls.filter(call=>call[0]==='clear').length,1);
+  assert.equal(gl.calls.filter(call=>call[0]==='vertexAttribPointer').length,0);
 });
 
 test('shader compilation and context restore failures disable only the exact layer',()=>{

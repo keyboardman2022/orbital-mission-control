@@ -155,6 +155,7 @@
         const pixelWidth=Math.max(1,Math.round(width*dpr)),pixelHeight=Math.max(1,Math.round(height*dpr));
         if(canvas.width!==pixelWidth)canvas.width=pixelWidth;if(canvas.height!==pixelHeight)canvas.height=pixelHeight;
         gl.viewport(0,0,pixelWidth,pixelHeight);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(program);
+        if(!highBuffer||!lowBuffer||!segments.some(segment=>segment.count>1))return true;
         const origin=worldOrigin(view,width,height);
         gl.uniform2f(locations.originHigh,origin.x.high,origin.y.high);gl.uniform2f(locations.originLow,origin.x.low,origin.y.low);gl.uniform2f(locations.viewport,width,height);gl.uniform1f(locations.scale,view.scale);
         gl.bindBuffer(gl.ARRAY_BUFFER,highBuffer);gl.enableVertexAttribArray(locations.high);gl.vertexAttribPointer(locations.high,2,gl.FLOAT,false,0,0);

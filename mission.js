@@ -19,8 +19,19 @@
   let csrf='',online=false,sessionReady=false,stream=null,streamEpoch=0,connecting=false,identityEpoch=0,selectionEpoch=0,selectedId=null;
   let satellites=new Map(),trails=new Map(),displayStates=new Map(),liveObservers=new Map(),hiddenLive=false,paused=false,nextCursor=null;
   let historyPoints=[],historyMode=false,playing=false,replayElapsed=0,lastFrame=performance.now(),recoveryKey='',pendingLaunch=null,launchBusy=false;
-  const history=OrbitalHistory,historyCache=history.createCache(),historyTrail=history.createTrail(6000);
-  let historySnapshot=null,historyCutoffSeq,historyVersion=0,historyController=null,historyLoading=false,historyResume=false;
+  const history=OrbitalHistory,historyCache=history.createCache();
+  let windowStatus='',exactStatus='',exactStableStatus='';
+  function updateHistoryStatus(){$('historyMessage').textContent=[windowStatus,exactStatus].filter(Boolean).join(' · ');}
+  function setExactStatus(text){exactStableStatus=text;exactStatus=text;updateHistoryStatus();}
+  const exactStore=OrbitalHistoryGL.createStore({maxPoints:OrbitalHistoryGL.HARD_MAX_POINTS});
+  const exactCanvas=document.createElement('canvas');
+  const exactRenderer=OrbitalHistoryGL.createRenderer(exactCanvas,{maxPoints:OrbitalHistoryGL.HARD_MAX_POINTS,onStatus:status=>{
+    if(status==='lost')exactStatus='精确轨迹图层暂时中断，正在等待图形上下文恢复…';
+    else if(status==='restored')exactStatus=exactStableStatus;
+    else if(['unavailable','error','restore-failed'].includes(status)){exactStableStatus='此浏览器不支持完整精确轨迹；局部窗口回放仍可使用。';exactStatus=exactStableStatus;}
+    updateHistoryStatus();
+  }});
+  let historySnapshot=null,historyCutoffSeq,historyRequestVersion=0,historySessionVersion=0,historyController=null,exactController=null,historyLoading=false,exactLoading=false,exactStarted=false,historyResume=false;
   let exportTimer=null,exportEpoch=0,lastServerTick=-1,currentUserId=null,identityBusy=false,deletingId=null;
   function identityLock(busy){identityBusy=busy;for(const id of ['reconnect','recover','rotateKey','logout'])$(id).disabled=busy;}
   const satelliteNodes=new Map();
@@ -178,7 +189,11 @@
     distanceGrid();
     if(view.scale*model.MODEL.rs>12){ring(model.MODEL.rs,'#a4dba650');const q=project(model.MODEL.rs,0);ctx.fillStyle='#a4dba6';ctx.font='10px ui-monospace,monospace';ctx.fillText('r_s = '+units.formatKm(scale.schwarzschildRadiusKm),q.x+8,q.y+14);}
     if(preview.length&&draftVisible&&!historyMode)line(preview,'#ffaa6680',1,[4,6]);
-    if(historyMode&&historyPoints.length){for(const segment of historyTrail.visible(replayElapsed))if(segment.length>1)line(segment,'rgba(164,219,166,.52)',1.25);const point=replayPoint(replayElapsed),last=historyPoints.at(-1);if(point&&!(last.kind==='captured'&&replayElapsed>=last.elapsedSeconds-1e-9))drawSatellite(point,'回放 / '+(satellites.get(selectedId)?.name||''),true,satellites.get(selectedId)?.massKg||1000);}
+    if(historyMode&&exactRenderer.available&&!document.hidden){
+      const rendered=exactRenderer.render({view,width,height,dpr:Math.min(devicePixelRatio||1,2),time:replayElapsed,hidden:document.hidden,segments:exactStore.visibleRanges(replayElapsed)});
+      if(rendered&&exactCanvas.width&&exactCanvas.height)ctx.drawImage(exactCanvas,0,0,exactCanvas.width,exactCanvas.height,0,0,width,height);
+    }
+    if(historyMode&&historyPoints.length){const point=replayPoint(replayElapsed),last=historyPoints.at(-1);if(point&&!(last.kind==='captured'&&replayElapsed>=last.elapsedSeconds-1e-9))drawSatellite(point,'回放 / '+(satellites.get(selectedId)?.name||''),true,satellites.get(selectedId)?.massKg||1000);}
     else if(!hiddenLive&&!historyMode){for(const [id,s]of displayStates){
       if(!['active','captured','escaped'].includes(s.status))continue;
       if(s.status==='captured'&&!impactWaves.some(w=>w.id===id))continue;
@@ -223,17 +238,37 @@
     message(`「${s.name}」已被黑洞吞噬 · 存活 ${s.state.elapsedSeconds.toFixed(3)} 模拟秒`);
   }
   function replayPoint(time){return history.interpolate(historyPoints,time);}
-  function clearHistory(){historyVersion++;historyController?.abort();historyController=null;historyLoading=false;historyResume=false;historySnapshot=null;historyCutoffSeq=undefined;historyCache.clear();historyTrail.clear();historyPoints=[];$('history').disabled=false;$('play').textContent='播放';}
+  function clearHistory(){historySessionVersion++;historyRequestVersion++;historyController?.abort();exactController?.abort();historyController=null;exactController=null;historyLoading=false;exactLoading=false;exactStarted=false;historyResume=false;historySnapshot=null;historyCutoffSeq=undefined;windowStatus='';exactStatus='';exactStableStatus='';historyCache.clear();exactStore.clear();exactRenderer.clear();historyPoints=[];$('history').disabled=false;$('play').textContent='播放';updateHistoryStatus();}
   function cachedHistory(time){const tick=Math.min(historySnapshot?.tick??0,time*model.MODEL.tickRate),range=historyCache.range;return !!range&&tick>=range.fromTick&&tick<=range.toTick&&historyCache.contains(time);}
+  async function startExactHistory(id,cutoffSeq,expectedPoints,sessionVersion,identity,selection){
+    exactController?.abort();exactController=new AbortController();const signal=exactController.signal;
+    exactStore.clear();exactRenderer.clear();
+    if(!exactRenderer.available){exactLoading=false;setExactStatus('此浏览器不支持完整精确轨迹；局部窗口回放仍可使用。');return;}
+    exactLoading=true;
+    const current=()=>historyMode&&selectedId===id&&sessionVersion===historySessionVersion&&identity===identityEpoch&&selection===selectionEpoch&&!signal.aborted;
+    try{
+      await history.loadExact(async options=>{
+        const params=new URLSearchParams({limit:String(options.limit),cutoffSeq:String(cutoffSeq)});if(options.cursor!==null)params.set('cursor',options.cursor);
+        return api('/api/satellites/'+encodeURIComponent(id)+'/trajectory?'+params,{signal});
+      },{cutoffSeq,maxPoints:OrbitalHistoryGL.HARD_MAX_POINTS,pageSize:5000,signal,onPage:(points,meta)=>{
+        if(!current())throw new DOMException('历史读取已取消','AbortError');
+        const chunk=exactStore.append(points);if(chunk)exactRenderer.append(chunk);
+        const total=Math.max(expectedPoints||cutoffSeq||meta.pointCount,meta.pointCount),percent=Math.min(100,meta.pointCount/total*100);
+        setExactStatus(`完整轨迹已加载 ${meta.pointCount.toLocaleString('zh-CN')} / ${total.toLocaleString('zh-CN')} 点 · ${percent.toFixed(1)}%`);
+      }});
+      if(current())setExactStatus(`完整精确轨迹 · ${exactStore.pointCount.toLocaleString('zh-CN')} 个保存点 · 截止 seq ${cutoffSeq}${historySnapshot.trajectoryCoverage?.status==='capped'?' · 轨迹仅记录到存储上限。':''}`);
+    }catch(error){if(current()&&error.name!=='AbortError')setExactStatus(`完整轨迹不完整：已保留 ${exactStore.pointCount.toLocaleString('zh-CN')} 个点。${error.message}`);}
+    finally{if(current())exactLoading=false;}
+  }
   async function requestHistory(time,resume=false){
     if(!historySnapshot)return false;
-    const id=selectedId,identity=identityEpoch,selection=selectionEpoch,version=++historyVersion;
+    const id=selectedId,identity=identityEpoch,selection=selectionEpoch,requestVersion=++historyRequestVersion;
     historyController?.abort();historyController=new AbortController();const signal=historyController.signal;
     replayElapsed=Math.min(history.lifecycle(historySnapshot,model.MODEL.tickRate).endSeconds,Math.max(0,time));$('timeline').value=replayElapsed;
     historyResume=resume;playing=false;$('play').textContent=resume?'暂停':'播放';
     if(cachedHistory(replayElapsed)){historyLoading=false;playing=resume;historyResume=false;$('history').disabled=false;updateReplayLabel();return true;}
-    historyLoading=true;$('history').disabled=true;$('historyMessage').textContent='正在加载 '+replayElapsed.toFixed(2)+' 模拟秒附近的历史…';updateReplayLabel();
-    const current=()=>version===historyVersion&&identity===identityEpoch&&selection===selectionEpoch&&id===selectedId&&!signal.aborted;
+    historyLoading=true;$('history').disabled=true;windowStatus='正在加载 '+replayElapsed.toFixed(2)+' 模拟秒附近的历史…';updateHistoryStatus();updateReplayLabel();
+    const current=()=>requestVersion===historyRequestVersion&&identity===identityEpoch&&selection===selectionEpoch&&id===selectedId&&!signal.aborted;
     try{
       const range=history.windowRange(replayElapsed,historySnapshot,model.MODEL.tickRate);
       const result=await history.loadWindow(range,async options=>{
@@ -242,18 +277,21 @@
         if(options.cursor)params.set('cursor',options.cursor);if(options.cutoffSeq!==undefined)params.set('cutoffSeq',String(options.cutoffSeq));
         const data=await api('/api/satellites/'+encodeURIComponent(id)+'/trajectory?'+params,{signal});
         if(!current())throw new DOMException('History request replaced','AbortError');
-        if(data.trajectoryCoverage?.status==='capped'){
-          historySnapshot.trajectoryCoverage={...data.trajectoryCoverage};historySnapshot.tick=data.trajectoryCoverage.endTick;historySnapshot.elapsedSeconds=data.trajectoryCoverage.endElapsedSeconds;replayElapsed=Math.min(replayElapsed,data.trajectoryCoverage.endElapsedSeconds);$('timeline').max=data.trajectoryCoverage.endElapsedSeconds;$('timeline').value=replayElapsed;
+        if(data.trajectoryCoverage){
+          historySnapshot.trajectoryCoverage={...data.trajectoryCoverage};
+          if(data.trajectoryCoverage.status==='capped'){historySnapshot.tick=data.trajectoryCoverage.endTick;historySnapshot.elapsedSeconds=data.trajectoryCoverage.endElapsedSeconds;replayElapsed=Math.min(replayElapsed,data.trajectoryCoverage.endElapsedSeconds);$('timeline').max=data.trajectoryCoverage.endElapsedSeconds;$('timeline').value=replayElapsed;}
         }
         if(historyCutoffSeq===undefined){if(!Number.isSafeInteger(data.cutoffSeq))throw new Error('历史读取缺少固定截止标记');historyCutoffSeq=data.cutoffSeq;}
         return data;
       },{targetTick:replayElapsed*model.MODEL.tickRate,cutoffSeq:historyCutoffSeq});
       if(!current())return false;
-      historyCutoffSeq=result.cutoffSeq;historyCache.set(result.range,result.points);historyPoints=historyCache.points;historyTrail.add(result.range,result.points);
+      historyCutoffSeq=result.cutoffSeq;historyCache.set(result.range,result.points);historyPoints=historyCache.points;
       if(!historyCache.contains(replayElapsed))throw new Error('此时刻尚无可插值的已归档采样点，请稍后重新加载历史。');
       playing=historyResume;historyResume=false;$('play').textContent=playing?'暂停':'播放';
-      $('historyMessage').textContent=`当前窗口 ${historyPoints.length} 个采样点 · 累计保留 ${historyTrail.pointCount} 个采样点 / ${historyTrail.segmentCount} 段已加载轨迹 · 截止 tick ${historySnapshot.tick}。拖动完整时间轴按需读取历史，回放轨迹会随时间推进持续绘制。${historySnapshot.trajectoryCoverage?.status==='capped'?' 轨迹仅记录到存储上限。':''}`;updateReplayLabel();return true;
-    }catch(e){if(current()){playing=false;historyResume=false;$('play').textContent='播放';$('historyMessage').textContent=e.message;}return false;}
+      windowStatus=`当前窗口 ${historyPoints.length} 个采样点 · 截止 tick ${historySnapshot.tick}。拖动时间轴会按需读取当前位置和速度。${historySnapshot.trajectoryCoverage?.status==='capped'?' 轨迹仅记录到存储上限。':''}`;updateHistoryStatus();
+      if(!exactStarted){exactStarted=true;void startExactHistory(id,historyCutoffSeq,historySnapshot.trajectoryCoverage?.lastSeq||historyCutoffSeq,historySessionVersion,identity,selection);}
+      updateReplayLabel();return true;
+    }catch(e){if(current()){playing=false;historyResume=false;$('play').textContent='播放';windowStatus=e.message;updateHistoryStatus();}return false;}
     finally{if(current()){historyLoading=false;$('history').disabled=false;}}
   }
   function advanceLive(seconds){
