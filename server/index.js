@@ -7,7 +7,7 @@ const {timingSafeEqual}=require('node:crypto');
 const {createStreamState,buildSnapshot}=require('./stream-snapshot.js');
 const ROOT=resolve(__dirname,'..');
 const HELD_LOCKS=new Set();
-const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','preview-worker.js','orbital-visuals.js','shared/simulation.js','shared/units.js','shared/history-window.js','shared/map-sweep.js']);
+const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','history-webgl.js','preview-worker.js','orbital-visuals.js','shared/simulation.js','shared/units.js','shared/history-window.js','shared/map-sweep.js']);
 const TYPES={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',json:'application/json; charset=utf-8',csv:'text/csv; charset=utf-8'};
 const error=(status,message)=>Object.assign(new Error(message),{status});
 function acquireLock(dataDir){

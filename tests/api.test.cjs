@@ -12,6 +12,8 @@ test('HTTP launch, ownership, CSRF, persistence, pagination, recovery and export
    const res=await fetch(app.url+path,{method,headers:{...(cookie?{cookie}:{}),...(csrfToken?{'X-CSRF-Token':csrfToken}:{}),...(body?{'Content-Type':'application/json'}:{}),...(origin?{Origin:origin}:{})},body:body?JSON.stringify(body):undefined});
    return {res,data:res.headers.get('content-type')?.includes('json')?await res.json():await res.text()};
  }
+ const historyScript=await request('/history-webgl.js');assert.equal(historyScript.res.status,200);assert.match(historyScript.res.headers.get('content-type'),/text\/javascript/);assert.match(historyScript.data,/OrbitalHistoryGL/);
+ const missionPage=await request('/mission.html');assert.ok(missionPage.data.indexOf('history-webgl.js')<missionPage.data.indexOf('mission.js'));
  const ga=await request('/api/session/guest',{method:'POST',body:{}}),a={cookie:ga.res.headers.get('set-cookie').split(';')[0],csrfToken:ga.data.csrfToken};
  assert.equal(ga.res.status,200);assert.ok(ga.data.recoveryKey);
  const gb=await request('/api/session/guest',{method:'POST',body:{}}),b={cookie:gb.res.headers.get('set-cookie').split(';')[0],csrfToken:gb.data.csrfToken};
