@@ -6,14 +6,14 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (units) {
   'use strict';
   // Paczynski–Wiita test particles; scene units, not relativistic geodesics.
-  const sweepSpeed=150,sweepSeconds=60,observationRadius=sweepSpeed*sweepSeconds;
+  const sweepSpeed=150,sweepSeconds=600,observationRadius=sweepSpeed*sweepSeconds;
   const MODEL = Object.freeze({
     version: 'pw-2d-v1', mu: 2000000, rs: 66, captureRadius: 69.3,
     tickRate: 240, step: 1 / 240,
     dynamics: Object.freeze({version:'two-body-pw-v1',maxMassKg:1e30,centralMassKg:units.centralMassKg,
       referenceFrame:'satellite position and velocity relative to its independent black hole',
       approximation:'finite-mass extension of PW pair potential; not GR, no satellite-satellite forces'}),
-    observation:Object.freeze({version:'sweep-60s-v1',sweepSpeed,sweepSeconds,radius:observationRadius,endReason:'out_of_observable'}),
+    observation:Object.freeze({version:'sweep-10min-v2',sweepSpeed,sweepSeconds,radius:observationRadius,endReason:'out_of_observable'}),
     limits: Object.freeze({ maxRadius: observationRadius, maxSpeed: 1000, maxMassKg: 1e12, minRadius: 80 }),
     calibration: units?.SCALE,
     units: Object.freeze({ length: 'scene length', time: 'simulation second', mass: 'kg', speed: 'scene length / simulation second', angle: 'degrees; +X = 0, counterclockwise; +Y up' })

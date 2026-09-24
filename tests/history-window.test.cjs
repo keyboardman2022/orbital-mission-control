@@ -195,9 +195,10 @@ test('mission clamps extreme zoom requests to the observable scale and keeps dis
  const canvas=h.node('universe');
  for(let i=0;i<3;i++)canvas.dispatch('wheel',{deltaY:1e6,deltaMode:0,clientX:500,clientY:400,preventDefault(){}});
  h.node('blackHoleMarker').onclick();canvas.dispatch('click',{clientX:0,clientY:0});
- assert.ok(Math.abs(Math.hypot(Number(h.node('x').value),Number(h.node('y').value))-U.toKm(9000))<1e-5);
+ assert.ok(Math.abs(Math.hypot(Number(h.node('x').value),Number(h.node('y').value))-U.toKm(90000))<1e-4);
  assert.match(h.node('physicalScale').textContent,/1\.9884e\+31 kg/);
  assert.match(h.node('observationRange').textContent,/不是引力边界/);
+ assert.match(h.node('observationRange').textContent,/10 分钟/);
  h.node('x').value=1e6;h.node('y').value=0;h.node('locate').onclick();
  canvas.dispatch('click',{clientX:500,clientY:416});
  assert.ok(Math.abs(Number(h.node('x').value)-1e6)<1e-5);
@@ -207,12 +208,12 @@ test('mission clamps extreme zoom requests to the observable scale and keeps dis
 
 test('mission removes an outward satellite from the map and labels its archive after crossing',async()=>{
  const h=await missionHarness('active');
- const exiting={...h.satellite,state:{...h.satellite.state,x:8999.9,y:0,vx:200,vy:0}};
+ const exiting={...h.satellite,state:{...h.satellite.state,x:89999.9,y:0,vx:200,vy:0}};
  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[exiting],server:{tick:2,status:'running'}})});
  h.frames[0](16);
  assert.equal(h.liveRenders.length,0);
  assert.match(h.node('detailMeta').textContent,/超出可观测区域/);
- h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{...exiting,status:'out_of_observable',endReason:'out_of_observable',state:{...exiting.state,x:9000,status:'out_of_observable'}}],server:{tick:3,status:'recovering'}})});
+ h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{...exiting,status:'out_of_observable',endReason:'out_of_observable',state:{...exiting.state,x:90000,status:'out_of_observable'}}],server:{tick:3,status:'recovering'}})});
  h.frames[1](32);assert.equal(h.liveRenders.length,0);
  assert.match(h.node('detailMeta').textContent,/超出可观测区域/);
 });
@@ -336,12 +337,12 @@ test('map sweep progressively removes satellites, terminates them and rejects la
   h.frames[91](9100);assert.equal(h.liveRenders.length,rendered);
   assert.equal(h.node('sweepAll').disabled,false);
 });
-test('an empty map still plays the wave and finishes without attempting to terminate historical satellites',async()=>{
+test('an empty map still plays the wave for longer than one minute without terminating historical satellites',async()=>{
   const h=await missionHarness('terminated');await h.node('sweepAll').onclick();
   assert.equal(h.node('sweepAll').textContent,'停止冲击波');
   for(let i=0;i<630;i++)h.frames[i](i*100);
-  assert.equal(h.sweepRequests.length,0);assert.equal(h.node('sweepAll').disabled,false);
-  assert.ok(h.node('notice').textContent.includes('已清除 0'));
+  assert.equal(h.sweepRequests.length,0);assert.equal(h.node('sweepAll').textContent,'停止冲击波');
+  assert.match(h.node('viewMode').textContent,/剩余约 9\.0 分钟/);
 });
 test('stopping a wave leaves satellites it has not reached running',async()=>{
   const h=await missionHarness('active');await h.node('sweepAll').onclick();h.frames[0](100);
@@ -351,14 +352,15 @@ test('stopping a wave leaves satellites it has not reached running',async()=>{
   assert.ok(h.node('notice').textContent.includes('已停止'));assert.ok(h.liveRenders.length>0);
 });
 
-test('full-map wave reaches the fixed observation boundary in sixty seconds even after panning',async()=>{
- const h=await missionHarness();await h.node('sweepAll').onclick();
+test('full-map wave reaches the expanded observation boundary in ten minutes even after panning',async()=>{
+ const h=await missionHarness('terminated');await h.node('sweepAll').onclick();
  for(let i=0;i<50;i++)h.node('universe').dispatch('keydown',{key:'ArrowLeft',shiftKey:true,preventDefault(){}});
- for(let i=0;i<=601;i++){h.frames[i](i*100);await h.flush();}
+ for(let i=0;i<=600;i++){h.frames[i](i*100);await h.flush();}
  assert.match(h.node('viewMode').textContent,/4,027\.16 km/);
- assert.match(h.node('viewMode').textContent,/剩余约 0 秒/);
- for(let i=602;i<630;i++){h.frames[i](i*100);await h.flush();}
+ assert.match(h.node('viewMode').textContent,/剩余约 9\.0 分钟/);
+ for(let i=601;i<6008;i++)h.frames[i](i*100);
  assert.equal(h.node('sweepAll').textContent,'全图冲击波');
+ assert.ok(h.node('notice').textContent.includes('已清除 0'));
 });
 
 test('mission pins the first page cutoff before an interrupted initial window finishes loading',async()=>{

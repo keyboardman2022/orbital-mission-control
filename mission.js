@@ -11,6 +11,7 @@
   const sweptIds=new Set(),sweepPending=new Set();
   const visualMass=mass=>Math.max(1,Math.min(3,1+Math.log10(Math.max(1,mass)/1000+1)*.6));
   const OBSERVATION_RADIUS=model.MODEL.observation.radius,MAX_ZOOM=2;
+  const SWEEP_DURATION_TEXT=model.MODEL.observation.sweepSeconds%60===0?`${model.MODEL.observation.sweepSeconds/60} 分钟`:`${model.MODEL.observation.sweepSeconds} 秒`;
   let minZoom=.1;
   let width=0,height=0,zoom=1.2,view,draft=null,draftVisible=true,invalidCapture=false,preview=[],previewToken=0,previewTimer;
   let cameraOffset={x:0,y:0},lastPointer=null;
@@ -332,7 +333,7 @@
       clearHistory();historyMode=false;playing=false;hiddenLive=false;paused=false;$('pause').textContent='暂停观察';$('replay').hidden=true;
       for(const s of targets)satellites.set(s.id,s);
       mapWave=OrbitalSweep.create({ids:targets.map(s=>s.id),origin:{x:0,y:0},extent:OBSERVATION_RADIUS});mapWave.flares=[];mapWave.total=targets.length;mapWave.failures=0;
-      $('sweepAll').textContent='停止冲击波';updateLaunch();$('viewMode').textContent='恒速冲击波';message('冲击波以固定速度扩散，约 1 分钟到达可观测区域边界，缩放和拖拽不改变传播速度与范围。可随时停止；扫过的卫星终止运行，已有轨迹保留。');
+      $('sweepAll').textContent='停止冲击波';updateLaunch();$('viewMode').textContent='恒速冲击波';message(`冲击波以固定速度扩散，约 ${SWEEP_DURATION_TEXT} 到达可观测区域边界，缩放和拖拽不改变传播速度与范围。可随时停止；扫过的卫星终止运行，已有轨迹保留。`);
     }catch(e){if(epoch===sweepEpoch){sweepBusy=false;$('sweepAll').textContent='全图冲击波';updateLaunch();message(e.message);}}
   };
   function frame(now){const elapsed=Math.max(0,(now-lastFrame)/1000),dt=Math.min(elapsed,.1);lastFrame=now;if(!paused){liveTime+=elapsed;if(!document.hidden){advanceLive(elapsed);advanceSweep(Math.min(elapsed,.1));}}if(!paused&&!document.hidden&&!reducedMotion.matches)visualTime+=dt*.3;impactWaves=impactWaves.filter(w=>visualTime-w.born<2.4);if(historyMode&&playing&&!historyLoading){const next=Math.min(Number($('timeline').max),replayElapsed+dt*number('rate'));if(!cachedHistory(next))requestHistory(next,true);else{replayElapsed=next;$('timeline').value=replayElapsed;if(replayElapsed>=Number($('timeline').max)){playing=false;$('play').textContent='播放';}updateReplayLabel();}}if(liveTime-lastTelemetryTime>=.1){renderList();renderDetail();lastTelemetryTime=liveTime;}draw();requestAnimationFrame(frame);}requestAnimationFrame(frame);
@@ -420,7 +421,7 @@
   document.querySelectorAll('[data-export]').forEach(button=>button.onclick=async()=>{const id=selectedId,epoch=++exportEpoch;if(!id)return;$('downloadExport').hidden=true;$('historyMessage').textContent='正在创建导出任务…';try{const data=await api('/api/satellites/'+encodeURIComponent(id)+'/exports',{method:'POST',body:JSON.stringify({format:button.dataset.export})});if(epoch!==exportEpoch)return;pollExport(data.export,epoch);}catch(e){if(epoch===exportEpoch)$('historyMessage').textContent=e.message;}});
   async function pollExport(job,epoch){if(epoch!==exportEpoch)return;if(job.status==='ready'||job.status==='completed'){const link=$('downloadExport');link.href=job.downloadUrl||'/api/exports/'+encodeURIComponent(job.id)+'/download';link.textContent='下载 '+(job.format||'')+' 文件';link.hidden=false;const capped=job.trajectoryCoverage?.status==='capped'||satellites.get(selectedId)?.trajectoryCoverage?.status==='capped';$('historyMessage').textContent='轨迹导出已就绪 · 截止 tick '+job.cutoffTick+(capped?' · 轨迹已截断于存储上限':'');return;}if(job.status==='error'||job.status==='failed'){$('historyMessage').textContent='导出失败：'+(job.message||job.error||job.errorMessage||'请重试');return;}$('historyMessage').textContent='服务器正在生成轨迹导出…';exportTimer=setTimeout(async()=>{try{const data=await api('/api/exports/'+encodeURIComponent(job.id));pollExport(data.export,epoch);}catch(e){if(epoch===exportEpoch)$('historyMessage').textContent=e.message;}},1500);}
   $('physicalScale').textContent=`黑洞质量：${scale.centralMassSolar} M☉ ≈ ${units.centralMassKg.toExponential(4)} kg · 视界半径 r_s = ${units.formatKm(scale.schwarzschildRadiusKm)}。1 现实秒推进约 ${scale.secondsPerUnit.toPrecision(5)} s 模型物理时间，相当于慢放约 ${(1/scale.secondsPerUnit).toFixed(0)} 倍。`;
-  $('observationRange').textContent=`可观测区域半径：${units.formatKm(units.toKm(OBSERVATION_RADIUS))}，等于恒速冲击波 ${model.MODEL.observation.sweepSeconds} 秒的传播距离。黑洞居中时可缩小至区域边界；卫星越界后移除并归档为“超出可观测区域”，仍可回放和导出。这是观察范围，不是引力边界。`;
+  $('observationRange').textContent=`可观测区域半径：${units.formatKm(units.toKm(OBSERVATION_RADIUS))}，等于恒速冲击波 ${SWEEP_DURATION_TEXT} 的传播距离。黑洞居中时可缩小至区域边界；卫星越界后移除并归档为“超出可观测区域”，仍可回放和导出。这是观察范围，不是引力边界。`;
   $('launchLimits').textContent=`当前模拟允许出生半径 ${units.formatKm(units.toKm(80))}–${units.formatKm(units.toKm(model.MODEL.limits.maxRadius))}；初速度小于 299792.458 km/s`;
   setZoom(zoom);validate();connect();
 })();
