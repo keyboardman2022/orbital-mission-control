@@ -20,6 +20,14 @@ test('satellite and trail do not add brightness; unresolved far objects produce 
  assert.ok(ctx.strokes.every(s=>s.blend==='source-over'&&s.width<.8&&s.opacity<.1));
  const count=ctx.strokes.length;V.renderTrail(ctx,points,project,3,1e-7);assert.equal(ctx.strokes.length,count);
 });
+test('orbiting stars retain a readable core while their physical glow scales with zoom',()=>{
+ const near=V.stellarAppearance(1,{collisionRadius:20}),far=V.stellarAppearance(.01,{collisionRadius:20});
+ assert.equal(near.radius,20);assert.equal(far.radius,.2);
+ assert.ok(near.markerRadius>=3&&far.markerRadius>=3);
+ const ctx=context(),arcs=[];ctx.arc=(x,y,r)=>arcs.push({x,y,r});ctx.fill=()=>{};
+ V.renderStar(ctx,{x:40,y:50},far,{color:'#fff0b8'});
+ assert.ok(arcs.some(arc=>arc.x===40&&arc.y===50&&arc.r===far.markerRadius));
+});
 test('map impact uses camera projection so zooming out shrinks its radius and thickness',()=>{
  const ctx=context(),arcs=[];ctx.arc=(x,y,r)=>arcs.push({x,y,r});ctx.fill=()=>{};
  const transforms=[];ctx.translate=()=>{};ctx.rotate=()=>{};ctx.scale=(x,y)=>transforms.push({x,y});

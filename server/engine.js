@@ -103,13 +103,14 @@ class Engine{
     const requestHash=hash(JSON.stringify(initial));
     const old=this.db.prepare('SELECT * FROM satellites WHERE user_id=? AND idem=?').get(userId,idem);
     if(old){if(old.request_hash!==requestHash)fail(409,'同一发射请求不能更换参数');return this.get(userId,old.id);}
+    if(initial.dynamicsVersion!==M.MODEL.dynamics.version)fail(409,'新发射必须使用当前多引力源动力学版本，请刷新页面');
     if(this.clockError)fail(503,'服务器时钟异常，暂不能发射');
     if(this.records.size>=this.maxActive)fail(503,'当前并发计算容量已满，请稍后发射；已有卫星继续运行');
     // A newborn must never be durable ahead of its world's durable checkpoint.
     this.checkpoint();
     const id=randomUUID(),queued=this.targetTick()-this.tick>120,createdMs=Math.floor(this.now()),nameGenerated=!initial.name;
     if(nameGenerated)initial.name='SAT-'+hash(`${createdMs}:${id}`).slice(0,16);
-    const r={id,ownerId:userId,name:initial.name,massKg:initial.massKg,initial,sampling:{...this.samplingPolicy,legacyThroughSeq:0},trajectoryBudget:{...this.trajectoryPolicy,status:'recording',cappedAt:null},...(nameGenerated?{nameGenerated:true,nameTimestampMs:createdMs}:{}),status:queued?'queued':'active',birthTick:queued?null:this.tick,state:M.createState(initial,{continuousTracking:true}),createdAt:new Date(createdMs).toISOString(),endReason:null,seq:0,eventSeq:0,lastSample:null};
+    const r={id,ownerId:userId,name:initial.name,massKg:initial.massKg,initial,sampling:{...this.samplingPolicy,legacyThroughSeq:0},trajectoryBudget:{...this.trajectoryPolicy,status:'recording',cappedAt:null},...(nameGenerated?{nameGenerated:true,nameTimestampMs:createdMs}:{}),status:queued?'queued':'active',birthTick:queued?null:this.tick,state:M.createState(initial,{continuousTracking:true,fieldTick:this.tick}),createdAt:new Date(createdMs).toISOString(),endReason:null,seq:0,eventSeq:0,lastSample:null};
     if(queued)r.state.status='queued';
     this.transaction(()=>{
       if(!queued){r.lastSample={...M.snapshot(r.state),kind:'birth'};Budget.admit(r,r.lastSample);r.eventSeq=1;}
@@ -166,7 +167,7 @@ class Engine{
     }
     if(this.tick>=target){
       for(const r of this.records.values())if(r.status==='queued'){
-        r.status='active';r.state.status='active';r.birthTick=this.tick;this.sample(r,'birth');
+        r.status='active';r.state.status='active';r.birthTick=this.tick;if(r.state.dynamicsVersion===M.MODEL.dynamics.version)r.state.fieldTick=this.tick;this.sample(r,'birth');
         this.ensureSampler(r);
         this.pendingEvents.push({id:r.id,seq:++r.eventSeq,event:{type:'birth',tick:0,worldTick:r.birthTick,elapsedSeconds:0,x:r.state.x,y:r.state.y}});
       }

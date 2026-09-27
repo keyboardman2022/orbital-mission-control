@@ -3,7 +3,7 @@ importScripts('shared/units.js','shared/simulation.js');
 self.onmessage = ({data}) => {
   try {
     const checked=OrbitalModel.validateLaunch(data.input), initial=checked.normalized||checked.value||checked;
-    let state=OrbitalModel.createState(initial,{continuousTracking:true});
+    let state=OrbitalModel.createState(initial,{continuousTracking:true,fieldTick:data.fieldTick});
     const points=[{x:state.x,y:state.y}];
     for(let i=0;i<14400;i++){
       if(state.status&&state.status!=='active')break;

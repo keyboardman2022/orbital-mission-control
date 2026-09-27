@@ -122,9 +122,9 @@ test('loadExact stops before dispatch when aborted',async()=>{
   assert.equal(calls,0);
 });
 
-async function missionHarness(status='terminated',trajectoryCoverage=null,{webglAvailable=true}={}){
+async function missionHarness(status='terminated',trajectoryCoverage=null,{webglAvailable=true,workerAvailable=false}={}){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js');
-  const nodes=new Map(),requests=[],frames=[],streams=[],liveRenders=[],liveTrails=[],sweepRequests=[],deleteRequests=[],confirmations=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});
+  const nodes=new Map(),requests=[],frames=[],streams=[],workerMessages=[],liveRenders=[],liveTrails=[],starRenders=[],impactRenders=[],sweepRequests=[],deleteRequests=[],confirmations=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});let performanceNow=0;
   const exact={pages:[],renders:[],clearCount:0,destroyCount:0};
   const exactStore={pointCount:0,append(points){this.pointCount+=points.length;exact.pages.push(points);return {base:this.pointCount-points.length,length:points.length};},visibleRanges(){return this.pointCount>1?[{start:0,count:this.pointCount}]:[];},clear(){this.pointCount=0;}};
   const OrbitalHistoryGL={HARD_MAX_POINTS:409600,createStore:()=>exactStore,createRenderer:()=>({available:webglAvailable,append(){},render(input){exact.renders.push(input);return true;},clear(){exact.clearCount++;},destroy(){exact.destroyCount++;}})};
@@ -133,7 +133,7 @@ async function missionHarness(status='terminated',trajectoryCoverage=null,{webgl
   const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1},...(trajectoryCoverage?{trajectoryCoverage}:{})};
   node('exportJson').dataset.export='json';
   const reply=data=>({ok:true,json:async()=>data});
-  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalHistoryGL,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(){},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},confirm:text=>{confirmations.push(text);return true;},performance:{now:()=>0},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:()=>0,clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
+  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalHistoryGL,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},star(_ctx,point,appearance,body){starRenders.push({point,appearance,body});},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(_ctx,impactView,age,mass,angle){impactRenders.push({impactView,age,mass,angle});},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0}),stellarAppearance:(scale,body)=>({radius:body.collisionRadius*scale,markerRadius:3})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},confirm:text=>{confirmations.push(text);return true;},performance:{now:()=>performanceNow},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},...(workerAvailable?{Worker:class{postMessage(message){workerMessages.push(message);}}}:{}),devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:fn=>{if(workerAvailable)fn();return 0;},clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
     if(path.includes('/trajectory?'))return new Promise(resolve=>requests.push({path,options,resolve:data=>resolve(reply(data))}));
     if(path==='/api/session/guest')return reply({user:{id:'user'},csrfToken:'token'});
     if(path==='/api/model')return reply({model:model.MODEL,server:{tick:1}});
@@ -147,7 +147,7 @@ async function missionHarness(status='terminated',trajectoryCoverage=null,{webgl
   vm.runInNewContext(fs.readFileSync(require.resolve('../mission.js'),'utf8'),sandbox);
   const flush=()=>new Promise(resolve=>setImmediate(resolve));await flush();
   await node('satellites').children[0].onclick();
-  return {node,requests,flush,frames,streams,satellite,liveRenders,liveTrails,sweepRequests,deleteRequests,confirmations,exact};
+  return {node,requests,flush,frames,streams,workerMessages,setPerformanceNow:value=>{performanceNow=value;},satellite,liveRenders,liveTrails,starRenders,impactRenders,sweepRequests,deleteRequests,confirmations,exact};
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
@@ -216,6 +216,29 @@ test('mission removes an outward satellite from the map and labels its archive a
  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[{...exiting,status:'out_of_observable',endReason:'out_of_observable',state:{...exiting.state,x:90000,status:'out_of_observable'}}],server:{tick:3,status:'recovering'}})});
  h.frames[1](32);assert.equal(h.liveRenders.length,0);
  assert.match(h.node('detailMeta').textContent,/超出可观测区域/);
+});
+
+test('mission draws all prescribed stars and centers a stellar capture effect on the impacted star',async()=>{
+ const h=await missionHarness('active');h.frames[0](16);
+ assert.equal(h.starRenders.length,4);
+ const event={type:'captured',bodyType:'star',bodyId:'ember',bodyName:'烬星',bodyX:420,bodyY:25,fieldTick:2,substepFraction:.5,x:404,y:25,elapsedSeconds:1};
+ const captured={...h.satellite,status:'captured',endReason:'captured',state:{...h.satellite.state,status:'captured',event}};
+ h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[captured],server:{tick:2,status:'running'}})});
+ h.frames[1](32);
+ const impact=h.impactRenders.at(-1),hole=h.impactRenders.find(item=>item!==impact);
+ assert.ok(impact);
+ assert.notEqual(impact.impactView.cx,500);
+ assert.notEqual(impact.impactView.cy,392);
+ assert.match(h.node('notice').textContent,/撞上恒星「烬星」/);
+ assert.equal(hole,undefined);
+});
+
+test('paused observation keeps launch prediction synchronized to the latest server world tick',async()=>{
+ const h=await missionHarness('active',null,{workerAvailable:true});h.workerMessages.length=0;
+  h.node('pause').onclick();h.setPerformanceNow(10000);
+  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[],server:{tick:2401,status:'running'}})});
+ h.node('predict').checked=true;h.node('x').dispatch('input');
+  assert.equal(h.workerMessages.at(-1).fieldTick,2401);
 });
 
 test('mission rapid seeks abort older windows and ignore their late responses',async()=>{

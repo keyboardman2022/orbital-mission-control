@@ -4,7 +4,7 @@ const {mkdtempSync,rmSync}=require('node:fs');
 const {tmpdir}=require('node:os');
 const {join}=require('node:path');
 const {startServer}=require('../server/index.js');
-const initial={name:'测试卫星',position:{x:330,y:0},massKg:1000,speed:97.3,directionDeg:90,modelVersion:'pw-2d-v1',idempotencyKey:'api-launch-00001'};
+const initial={name:'测试卫星',position:{x:330,y:0},massKg:1000,speed:97.3,directionDeg:90,modelVersion:'pw-2d-v1',dynamicsVersion:'multi-attractor-pw-v1',idempotencyKey:'api-launch-00001'};
 test('HTTP launch, ownership, CSRF, persistence, pagination, recovery and exports',async t=>{
  const dir=mkdtempSync(join(tmpdir(),'orbital-api-'));let app=await startServer({port:0,dataDir:dir});
  t.after(async()=>{await app.close();rmSync(dir,{recursive:true,force:true});});

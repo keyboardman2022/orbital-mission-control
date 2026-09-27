@@ -18,7 +18,8 @@ async function run(){
     const legacyPolicy={version:'legacy-adaptive-v1',baseIntervalSeconds:1,innerRadius:4*record.model.rs,innerIntervalSeconds:record.model.step,linearPredictionErrorThreshold:.5,description:'Historical sampling: one-second base interval, every integration step inside four Schwarzschild radii, or scene-unit linear prediction error above 0.5; birth, terminal and export cutoff retained.'};
     metadata.sampling=record.sampling||record.satellite.sampling||legacyPolicy;
     if(metadata.sampling.legacyThroughSeq>0&&!metadata.sampling.legacyPolicy)metadata.sampling={...metadata.sampling,legacyPolicy};
-    metadata.dynamics=record.satellite.initial.dynamicsVersion?{...record.model.dynamics,gravitationalMu:record.satellite.state.gravitationalMu,relativeForceLaw:'a = -G(M+m) r_vector / [r (r-r_s)^2]',independent:true}:{version:'legacy-test-particle',gravitationalMu:record.model.mu,independent:true};
+    const dynamicsVersion=record.satellite.initial.dynamicsVersion;
+    metadata.dynamics=dynamicsVersion===record.model.dynamics.version?{...record.model.dynamics,gravitationalMu:record.satellite.state.gravitationalMu,blackHoleForceLaw:'a = -G(M+m) r_vector / [r (r-r_s)^2]',stellarForceLaw:'softened Newtonian point attractors on prescribed circular orbits',stars:record.model.stars,starStarForces:false,satelliteSatelliteForces:false}:dynamicsVersion?{version:dynamicsVersion,gravitationalMu:record.satellite.state.gravitationalMu,relativeForceLaw:'a = -G(M+m) r_vector / [r (r-r_s)^2]',independent:true}:{version:'legacy-test-particle',gravitationalMu:record.model.mu,independent:true};
     metadata.calibration=record.satellite.calibration||U.SCALE;
     metadata.physicalUnits={distance:'km',speed:'km/s',time:'s',mass:'kg'};
     metadata.description=metadata.trajectoryCoverage?.truncated

@@ -6,6 +6,20 @@ const OrbitalVisuals=(()=>{
     // Subpixel coverage fades out; there is no minimum screen-space marker size.
     return {radius,opacity:.85*Math.min(1,(radius/2)**2)};
   }
+  function stellarAppearance(scale,star){
+    const radius=Number.isFinite(scale)&&scale>0?Math.max(0,star?.collisionRadius||0)*scale:0;
+    return {radius,markerRadius:Math.max(3,Math.min(12,radius))};
+  }
+  function renderStar(ctx,p,appearance,star){
+    const core=appearance?.markerRadius||0;if(!core)return;
+    const glowRadius=Math.max(core*3,(appearance.radius||0)*2.2);
+    ctx.save();ctx.globalCompositeOperation='source-over';
+    const glow=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,glowRadius);
+    glow.addColorStop(0,'#fffdf2');glow.addColorStop(.16,star?.color||'#fff0b8');glow.addColorStop(.52,(star?.color||'#fff0b8')+'88');glow.addColorStop(1,'transparent');
+    ctx.fillStyle=glow;ctx.fillRect(p.x-glowRadius,p.y-glowRadius,glowRadius*2,glowRadius*2);
+    ctx.beginPath();ctx.arc(p.x,p.y,core,0,Math.PI*2);ctx.fillStyle=star?.color||'#fff0b8';ctx.fill();
+    ctx.beginPath();ctx.arc(p.x-core*.28,p.y-core*.3,Math.max(1,core*.3),0,Math.PI*2);ctx.fillStyle='#fffdf1';ctx.fill();ctx.restore();
+  }
   function renderSatellite(ctx,p,scale,mass=1){
     const {radius:r,opacity}=satelliteAppearance(scale,mass);
     if(opacity<.001)return;
@@ -149,7 +163,7 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
       }
       ctx.restore();
     }
-    return {blackhole,trail:renderTrail,satellite:renderSatellite,impact,mapImpact:renderMapImpact};
+    return {blackhole,star:renderStar,trail:renderTrail,satellite:renderSatellite,impact,mapImpact:renderMapImpact};
   }
   function renderMapImpact(ctx,wave,view){
     const {x,y}=wave.origin,r=Math.max(1,wave.radius),fade=Math.max(0,1-Math.max(0,wave.age-wave.duration)/.6);
@@ -164,6 +178,6 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
     for(const f of wave.flares||[]){const age=wave.age-f.born,alpha=Math.max(0,1-age/.5);ctx.fillStyle=`rgba(255,219,157,${alpha})`;for(let i=0;i<8;i++){const angle=i*Math.PI/4;ctx.beginPath();ctx.arc(f.x+Math.cos(angle)*age*65,f.y+Math.sin(angle)*age*65,Math.max(.5,2*alpha),0,Math.PI*2);ctx.fill();}}
     ctx.restore();
   }
-  return {create,satelliteAppearance,renderSatellite,renderTrail,renderMapImpact};
+  return {create,satelliteAppearance,stellarAppearance,renderStar,renderSatellite,renderTrail,renderMapImpact};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalVisuals;

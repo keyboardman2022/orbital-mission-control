@@ -7,7 +7,7 @@ const {Worker}=require('node:worker_threads');
 const {Engine}=require('../server/engine.js');
 const {createBackup}=require('../server/backup.js');
 const M=require('../shared/simulation.js');
-const input={name:'-1+1',position:{x:330,y:0},massKg:1000,speed:M.circularSpeed(330),directionDeg:90,idempotencyKey:'consistent-launch'};
+const input={name:'-1+1',position:{x:330,y:0},massKg:1000,speed:M.circularSpeed(330),directionDeg:90,dynamicsVersion:M.MODEL.dynamics.version,idempotencyKey:'consistent-launch'};
 function setup(t){const dir=mkdtempSync(join(tmpdir(),'orbital-recovery-')),engines=[];let now=100000;const filename=join(dir,'orbital.sqlite');const make=(path=filename)=>{const e=new Engine({filename:path,now:()=>now});engines.push(e);return e;};t.after(()=>{engines.forEach(e=>e.close());rmSync(dir,{recursive:true,force:true});});return {dir,filename,make,setTime:n=>now=n};}
 test('crash rolls back only uncommitted progress then deterministically catches up',t=>{
  const f=setup(t);let e=f.make();const u=e.guest().user.id,p=e.launch(u,input);e.advanceTo(240);e.checkpoint();e.advanceTo(480);

@@ -7,6 +7,7 @@ const M=require('../shared/simulation.js');
 const U=require('../shared/units.js');
 const {Engine}=require('../server/engine.js');
 const input=(massKg=1000)=>({name:'',position:{x:600,y:0},massKg,speed:60,directionDeg:90,dynamicsVersion:'two-body-pw-v1'});
+const currentInput=(massKg=1000)=>({...input(massKg),dynamicsVersion:M.MODEL.dynamics.version});
 test('finite mass changes independent two-body relative acceleration with the true mass ratio',()=>{
  const a=M.createState(input(1000)),b=M.createState(input(1e30));
  assert.equal(a.gravitationalMu,M.MODEL.mu);
@@ -39,20 +40,20 @@ test('legacy states keep their original force law and unsupported dynamics fail 
 test('timestamp hash names are unique, durable and stable across retries; custom names remain intact',t=>{
  const file=join(mkdtempSync(join(tmpdir(),'orbital-mass-')),'test.sqlite');
  let e=new Engine({filename:file,now:()=>100000});t.after(()=>e.close());const u=e.guest().user.id;
- const req={...input(1e30),idempotencyKey:'timestamp-hash-1'},a=e.launch(u,req),b=e.launch(u,{...req,idempotencyKey:'timestamp-hash-2'});
+ const req={...currentInput(1e30),idempotencyKey:'timestamp-hash-1'},a=e.launch(u,req),b=e.launch(u,{...req,idempotencyKey:'timestamp-hash-2'});
  assert.match(a.name,/^SAT-[a-f0-9]{16}$/);assert.notEqual(a.name,b.name);
  assert.equal(a.nameGenerated,true);assert.equal(a.nameTimestampMs,100000);
  assert.equal(e.launch(u,req).name,a.name);
  const c=e.launch(u,{...req,name:'自定义探测器',idempotencyKey:'custom-name-3'});assert.equal(c.name,'自定义探测器');
  e.advanceTo(800);e.checkpoint();const saved=e.get(u,a.id);e.close();e=new Engine({filename:file,now:()=>100000});
  assert.deepEqual(e.get(u,a.id),saved);assert.equal(e.launch(u,req).name,a.name);
- const exported=e.prepareExport(u,a.id,'json');assert.equal(exported.satellite.initial.dynamicsVersion,'two-body-pw-v1');
+ const exported=e.prepareExport(u,a.id,'json');assert.equal(exported.satellite.initial.dynamicsVersion,M.MODEL.dynamics.version);
  assert.equal(exported.satellite.state.gravitationalMu,M.effectiveMu(1e30));
 });
 test('launching another satellite cannot perturb an existing satellite trajectory',t=>{
  const make=()=>new Engine({filename:join(mkdtempSync(join(tmpdir(),'orbital-independent-')),'test.sqlite'),now:()=>100000});
  const a=make(),b=make();t.after(()=>{a.close();b.close();});const ua=a.guest().user.id,ub=b.guest().user.id;
- const p=a.launch(ua,{...input(1e30),idempotencyKey:'independent-1'}),q=b.launch(ub,{...input(1e30),idempotencyKey:'independent-1'});
- b.launch(ub,{...input(1e30),position:{x:601,y:0},idempotencyKey:'independent-2'});
+ const p=a.launch(ua,{...currentInput(1e30),idempotencyKey:'independent-1'}),q=b.launch(ub,{...currentInput(1e30),idempotencyKey:'independent-1'});
+ b.launch(ub,{...currentInput(1e30),position:{x:601,y:0},idempotencyKey:'independent-2'});
  a.advanceTo(2400);b.advanceTo(2400);assert.deepEqual(a.get(ua,p.id).state,b.get(ub,q.id).state);
 });
