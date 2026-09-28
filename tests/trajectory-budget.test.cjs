@@ -11,7 +11,7 @@ const {Engine}=require('../server/engine.js');
 const {archiveBatch}=require('../server/trajectory-store.js');
 const M=require('../shared/simulation.js');
 
-const launch={name:'预算验证',position:{x:330,y:0},massKg:1000,speed:M.circularSpeed(330),directionDeg:90,idempotencyKey:'budget-launch-0001'};
+const launch={name:'预算验证',position:{x:330,y:0},massKg:1000,speed:M.circularSpeed(330),directionDeg:90,dynamicsVersion:M.MODEL.dynamics.version,idempotencyKey:'budget-launch-0001'};
 
 function fixture(t,{trajectoryMaxPoints=3}={}){
   const dir=mkdtempSync(join(tmpdir(),'orbital-budget-')),filename=join(dir,'orbital.sqlite'),engines=[];

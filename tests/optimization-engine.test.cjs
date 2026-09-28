@@ -6,7 +6,7 @@ const {join}=require('node:path');
 const {Engine}=require('../server/engine.js');
 const M=require('../shared/simulation.js');
 const U=require('../shared/units.js');
-const launch={name:'far circle',position:{x:600,y:0},massKg:1000,speed:M.circularSpeed(600),directionDeg:90,modelVersion:M.MODEL.version,idempotencyKey:'optimized-orbit'};
+const launch={name:'far circle',position:{x:600,y:0},massKg:1000,speed:M.circularSpeed(600),directionDeg:90,modelVersion:M.MODEL.version,dynamicsVersion:M.MODEL.dynamics.version,idempotencyKey:'optimized-orbit'};
 function fixture(t){const dir=mkdtempSync(join(tmpdir(),'orbital-optimized-')),file=join(dir,'orbital.sqlite'),engines=[];t.after(()=>{for(const e of engines)e.close();rmSync(dir,{recursive:true,force:true});});return {file,make(options={}){const e=new Engine({filename:file,now:()=>100000,velocityRelativeTolerance:0,...options});engines.push(e);return e;}};}
 function checkReplay(raw,points,relative=0){let i=0;for(const p of raw){while(i+1<points.length&&points[i+1].elapsedSeconds<=p.elapsedSeconds)i++;const a=points[i],b=points[Math.min(i+1,points.length-1)],f=b.elapsedSeconds===a.elapsedSeconds?0:(p.elapsedSeconds-a.elapsedSeconds)/(b.elapsedSeconds-a.elapsedSeconds);assert.ok(Math.hypot(p.x-a.x-(b.x-a.x)*f,p.y-a.y-(b.y-a.y)*f)*U.SCALE.kmPerUnit<=.100000001);assert.ok(Math.hypot(p.vx-a.vx-(b.vx-a.vx)*f,p.vy-a.vy-(b.vy-a.vy)*f)*U.SCALE.kmSPerUnit<=Math.max(.1,Math.hypot(p.vx,p.vy)*U.SCALE.kmSPerUnit*relative)+1e-8);}}
 test('far orbit retains bounded-error samples without changing any integration state',t=>{

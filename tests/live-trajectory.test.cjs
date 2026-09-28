@@ -1,7 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const history=require('../shared/history-window.js'),M=require('../shared/simulation.js');
-function orbit(massKg=1000){return M.createState({name:'orbit',position:{x:220,y:0},massKg,speed:M.circularSpeed(220,M.effectiveMu(massKg)),directionDeg:90,dynamicsVersion:M.MODEL.dynamics.version},{continuousTracking:true});}
+function orbit(massKg=1000){return M.createState({name:'orbit',position:{x:220,y:0},massKg,speed:M.circularSpeed(220,M.effectiveMu(massKg)),directionDeg:90,dynamicsVersion:M.MODEL.dynamics.legacyVersion},{continuousTracking:true});}
 function advance(state,ticks){const result={...state};for(let i=0;i<ticks;i++)M.step(result);return result;}
 test('live motion follows the physical circular arc rather than the chord between packets',()=>{
   const a=orbit(),b=advance(a,240),segment=history.liveSegment(a,b,M);
