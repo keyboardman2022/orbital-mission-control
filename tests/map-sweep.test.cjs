@@ -2,7 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {mkdtempSync,rmSync}=require('node:fs'),{tmpdir}=require('node:os'),{join}=require('node:path');
 const {Engine}=require('../server/engine.js');
-const launch={name:'sweep',position:{x:600,y:0},massKg:1000,speed:65,directionDeg:90,modelVersion:'pw-2d-v1',dynamicsVersion:'multi-attractor-pw-v1'};
+const launch={name:'sweep',position:{x:600,y:0},massKg:1000,speed:65,directionDeg:90,modelVersion:'pw-2d-v3',dynamicsVersion:'multi-attractor-pw-v1'};
 test('map wave clears near satellites first, covers screen corners and finally includes offscreen targets',()=>{
   const wave=require('../shared/map-sweep.js').create({ids:['near','far','offscreen'],origin:{x:100,y:100},width:800,height:600});
   wave.advance(.1);assert.deepEqual(wave.hits(new Map([['near',{x:110,y:100}],['far',{x:800,y:600}],['offscreen',{x:1e9,y:1e9}]])),['near']);

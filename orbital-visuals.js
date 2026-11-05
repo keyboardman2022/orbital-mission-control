@@ -1,24 +1,35 @@
 'use strict';
 // Reuse the original ORBITAL dust textures, rotating bands, infall and photon glints.
 const OrbitalVisuals=(()=>{
+  const BLACK_HOLE_VISUAL_SCALE=1.65;
   function satelliteAppearance(scale,mass=1){
     const radius=Number.isFinite(scale)&&scale>0?20*Math.max(0,mass)*scale:0;
     // Subpixel coverage fades out; there is no minimum screen-space marker size.
     return {radius,opacity:.85*Math.min(1,(radius/2)**2)};
   }
   function stellarAppearance(scale,star){
-    const radius=Number.isFinite(scale)&&scale>0?Math.max(0,star?.collisionRadius||0)*scale:0;
-    return {radius,markerRadius:Math.max(3,Math.min(12,radius))};
+    const collisionRadius=Math.max(0,star?.collisionRadius||0);
+    const visualScale=Number.isFinite(scale)&&scale>0?scale:0;
+    const physicalRadius=collisionRadius*visualScale;
+    // Match the approved 96-unit shadow / 6..20-unit star preview using the
+    // unchanged 66 * 1.65 black-hole shadow. Collision geometry stays physical.
+    const worldRadius=collisionRadius>0?(6+14*Math.min(1,collisionRadius/86)**.7)*(108.9/96):0;
+    const radius=worldRadius*visualScale;
+    return {physicalRadius,radius,markerRadius:radius,opacity:Math.min(1,(radius/.7)**2)};
   }
-  function renderStar(ctx,p,appearance,star){
-    const core=appearance?.markerRadius||0;if(!core)return;
-    const glowRadius=Math.max(core*3,(appearance.radius||0)*2.2);
-    ctx.save();ctx.globalCompositeOperation='source-over';
+  function blackHoleAppearance(view){
+    return {...view,size:view.size*BLACK_HOLE_VISUAL_SCALE,scale:view.scale*BLACK_HOLE_VISUAL_SCALE};
+  }
+  function renderStar(ctx,p,appearance,star,t=0){
+    const core=appearance?.radius||0,opacity=appearance?.opacity??1;if(!core||opacity<1/255)return;
+    const glowRadius=core*2.8,color=star?.color||'#fff0b8';
+    ctx.save();ctx.globalCompositeOperation='source-over';ctx.globalAlpha=opacity;
     const glow=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,glowRadius);
-    glow.addColorStop(0,'#fffdf2');glow.addColorStop(.16,star?.color||'#fff0b8');glow.addColorStop(.52,(star?.color||'#fff0b8')+'88');glow.addColorStop(1,'transparent');
+    glow.addColorStop(0,color+'00');glow.addColorStop(.34,color+'48');glow.addColorStop(.45,color+'20');glow.addColorStop(1,'transparent');
     ctx.fillStyle=glow;ctx.fillRect(p.x-glowRadius,p.y-glowRadius,glowRadius*2,glowRadius*2);
-    ctx.beginPath();ctx.arc(p.x,p.y,core,0,Math.PI*2);ctx.fillStyle=star?.color||'#fff0b8';ctx.fill();
-    ctx.beginPath();ctx.arc(p.x-core*.28,p.y-core*.3,Math.max(1,core*.3),0,Math.PI*2);ctx.fillStyle='#fffdf1';ctx.fill();ctx.restore();
+    const surface=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,core);
+    surface.addColorStop(0,'#fff1c9');surface.addColorStop(.35,color);surface.addColorStop(.85,color+'e0');surface.addColorStop(1,color+'70');
+    ctx.beginPath();ctx.arc(p.x,p.y,core,0,Math.PI*2);ctx.fillStyle=surface;ctx.fill();ctx.restore();
   }
   function renderSatellite(ctx,p,scale,mass=1){
     const {radius:r,opacity}=satelliteAppearance(scale,mass);
@@ -178,6 +189,6 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
     for(const f of wave.flares||[]){const age=wave.age-f.born,alpha=Math.max(0,1-age/.5);ctx.fillStyle=`rgba(255,219,157,${alpha})`;for(let i=0;i<8;i++){const angle=i*Math.PI/4;ctx.beginPath();ctx.arc(f.x+Math.cos(angle)*age*65,f.y+Math.sin(angle)*age*65,Math.max(.5,2*alpha),0,Math.PI*2);ctx.fill();}}
     ctx.restore();
   }
-  return {create,satelliteAppearance,stellarAppearance,renderStar,renderSatellite,renderTrail,renderMapImpact};
+  return {create,satelliteAppearance,stellarAppearance,blackHoleAppearance,renderStar,renderSatellite,renderTrail,renderMapImpact};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalVisuals;

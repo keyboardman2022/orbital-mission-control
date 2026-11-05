@@ -14,13 +14,18 @@
       softening:collisionRadius*.5,phase,angularSpeed,periodTicks:2*Math.PI/angularSpeed*tickRate,color});
   };
   const stars=Object.freeze([
-    star('ember','烬星',420,.012,16,0,'#ffd39a'),
-    star('aurora','曙光',680,.025,20,1.7,'#fff0b8'),
-    star('cyan','青曜',1050,.045,26,3.45,'#bce8ff'),
-    star('giant','赤巨星',1600,.08,34,5.15,'#ff9f73')
+    star('ember','烬星',650,.006,12,.55,'#ffb36b'),
+    star('aurora','曙光',1350,.018,20,1.9,'#fff1a8'),
+    star('cyan','青曜',2800,.055,28,3.4,'#b8e7ff'),
+    star('giant','赤巨星',5200,.12,52,5,'#ff805d'),
+    star('ivory','白矮星',9500,.09,10,.2,'#f4f7ff'),
+    star('cinder','暮焰',17000,.012,16,2.6,'#e86e50'),
+    star('sapphire','蓝巨星',30000,.18,64,4.15,'#78bfff'),
+    star('helios','耀阳',50000,.22,72,5.45,'#ffe27a'),
+    star('colossus','绯红超巨星',76000,.28,86,1.25,'#ff5f67')
   ]);
   const MODEL = Object.freeze({
-    version: 'pw-2d-v1', mu: centralMu, rs: schwarzschildRadius, captureRadius: 69.3,
+    version: 'pw-2d-v3', mu: centralMu, rs: schwarzschildRadius, captureRadius: 69.3,
     tickRate, step: 1 / tickRate, stars,
     dynamics: Object.freeze({version:'multi-attractor-pw-v1',legacyVersion:'two-body-pw-v1',maxMassKg:1e30,centralMassKg:units.centralMassKg,
       referenceFrame:'satellite position and velocity relative to the fixed central black hole',

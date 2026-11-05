@@ -6,17 +6,19 @@
   const dynamicsLabel=version=>version===model.MODEL.dynamics.version?'黑洞 + 四恒星引力场':version===model.MODEL.dynamics.legacyVersion?'历史独立双体模型':'历史测试粒子模型';
   const trajectoryNotice=s=>s?.trajectoryCoverage?.status==='capped'?`轨迹记录已达约 100 MiB 上限 · 记录至 ${Number(s.trajectoryCoverage.endElapsedSeconds).toFixed(3)} 模拟秒`:'';
   const canvas=$('universe'),ctx=canvas.getContext('2d'),visuals=OrbitalVisuals.create();
+  const stellarCanvas=document.createElement('canvas'),stellarRenderer=OrbitalStellar.createRenderer(stellarCanvas);
+  globalThis.addEventListener?.('pagehide',event=>{if(!event.persisted)stellarRenderer.destroy();});
   const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
   let visualTime=0,liveTime=0,recovering=false,lastTelemetryTime=-1,impactWaves=[],seenCaptures=new Set(),replayCaptureShown=false;
   let mapWave=null,sweepBusy=false,sweepSending=false,sweepLastSend=-1,sweepEpoch=0;
   const sweptIds=new Set(),sweepPending=new Set();
   const visualMass=mass=>Math.max(1,Math.min(3,1+Math.log10(Math.max(1,mass)/1000+1)*.6));
-  const OBSERVATION_RADIUS=model.MODEL.observation.radius,MAX_ZOOM=2;
+  const OBSERVATION_RADIUS=model.MODEL.observation.radius,MAX_ZOOM=64;
   const SWEEP_DURATION_TEXT=model.MODEL.observation.sweepSeconds%60===0?`${model.MODEL.observation.sweepSeconds/60} 分钟`:`${model.MODEL.observation.sweepSeconds} 秒`;
   let minZoom=.1;
   let width=0,height=0,zoom=1.2,view,draft=null,draftVisible=true,invalidCapture=false,preview=[],previewToken=0,previewTimer;
   let cameraOffset={x:0,y:0},lastPointer=null;
-  let mapDrag=null,suppressMapClick=false,mapTool='pick',tracking=false;
+  let mapDrag=null,suppressMapClick=false,mapTool='pick',tracking=false,focusedStarId=null;
   const holeMarker=$('blackHoleMarker'),holeIcon=holeMarker.querySelector('.origin-icon'),holeLabel=holeMarker.querySelector('.origin-label');
   let csrf='',online=false,sessionReady=false,stream=null,streamEpoch=0,connecting=false,identityEpoch=0,selectionEpoch=0,selectedId=null;
   let satellites=new Map(),trails=new Map(),displayStates=new Map(),liveObservers=new Map(),hiddenLive=false,paused=false,nextCursor=null;
@@ -27,6 +29,8 @@
   function setExactStatus(text){exactStableStatus=text;exactStatus=text;updateHistoryStatus();}
   const exactStore=OrbitalHistoryGL.createStore({maxPoints:OrbitalHistoryGL.HARD_MAX_POINTS});
   const exactCanvas=document.createElement('canvas');
+  exactCanvas.id='historyTrajectory';exactCanvas.className='history-trajectory';exactCanvas.hidden=true;exactCanvas.setAttribute('aria-hidden','true');
+  Object.assign(exactCanvas.style,{position:'absolute',inset:'0',width:'100%',height:'100%',pointerEvents:'none',cursor:'default'});canvas.after(exactCanvas);
   const exactRenderer=OrbitalHistoryGL.createRenderer(exactCanvas,{maxPoints:OrbitalHistoryGL.HARD_MAX_POINTS,onStatus:status=>{
     if(status==='lost')exactStatus='精确轨迹图层暂时中断，正在等待图形上下文恢复…';
     else if(status==='restored')exactStatus=exactStableStatus;
@@ -35,6 +39,7 @@
   }});
   let historySnapshot=null,historyCutoffSeq,historyRequestVersion=0,historySessionVersion=0,historyController=null,exactController=null,historyLoading=false,exactLoading=false,exactStarted=false,historyResume=false;
   let exportTimer=null,exportEpoch=0,lastServerTick=-1,launchClockTick=0,launchClockNow=performance.now(),frozenStarTick=0,currentUserId=null,identityBusy=false,deletingId=null;
+  let observationClockTick=0,observationClockNow=performance.now();
   function identityLock(busy){identityBusy=busy;for(const id of ['reconnect','recover','rotateKey','logout'])$(id).disabled=busy;}
   const satelliteNodes=new Map();
   const worker=typeof Worker!=='undefined'?new Worker('preview-worker.js'):null;
@@ -73,7 +78,7 @@
   function resize(){const bounds=canvas.getBoundingClientRect();width=bounds.width;height=bounds.height;lastPointer=null;if(width<=0||height<=0)return;const dpr=Math.min(devicePixelRatio||1,2);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);minZoom=Math.min(MAX_ZOOM,OrbitalCamera.minimumZoom(width,height,OBSERVATION_RADIUS));setZoom(zoom);}
   new ResizeObserver(resize).observe(canvas);
   function setZoom(value,anchor=null,recenter=false){
-    zoom=Math.max(minZoom,Math.min(MAX_ZOOM,value));if(recenter)cameraOffset={x:0,y:0};
+    zoom=Math.max(minZoom,Math.min(MAX_ZOOM,value));if(recenter){cameraOffset={x:0,y:0};clearStellarFocus();}
     const next=OrbitalCamera.view(width,height,zoom,cameraOffset);
     view=anchor&&view?.scale>0?OrbitalCamera.zoomAt(view,next.scale,anchor):next;
     cameraOffset={x:view.cx-width*.54,y:view.cy-height*.49};
@@ -82,7 +87,7 @@
   const pointerPosition=e=>{const rect=canvas.getBoundingClientRect();return {x:e.clientX-rect.left,y:e.clientY-rect.top};};
   canvas.addEventListener('mousemove',e=>{lastPointer=pointerPosition(e);});
   function panMap(dx,dy){
-    if(!view)return;setTracking(false);$('follow').checked=false;view=OrbitalCamera.pan(view,dx,dy);
+    if(!view)return;setTracking(false);clearStellarFocus();$('follow').checked=false;view=OrbitalCamera.pan(view,dx,dy);
     cameraOffset={x:view.cx-width*.54,y:view.cy-height*.49};
   }
   canvas.addEventListener('pointerdown',e=>{
@@ -116,8 +121,8 @@
     const delta={ArrowLeft:[40,0],ArrowRight:[-40,0],ArrowUp:[0,40],ArrowDown:[0,-40]}[e.key];
     if(delta){e.preventDefault();panMap(delta[0]*(e.shiftKey?2:1),delta[1]*(e.shiftKey?2:1));}
   });
-  $('zoom').addEventListener('input',()=>{$('follow').checked=false;setZoom(minZoom*(MAX_ZOOM/minZoom)**(number('zoom')/1000),tracking?{x:width*.5,y:height*.52}:lastPointer||{x:width/2,y:height/2});});
-  canvas.addEventListener('wheel',e=>{if(!e.deltaY)return;e.preventDefault();$('follow').checked=false;lastPointer=pointerPosition(e);const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?height:1);setZoom(zoom*Math.exp(-delta*.001),tracking?{x:width*.5,y:height*.52}:lastPointer);},{passive:false});
+  $('zoom').addEventListener('input',()=>{$('follow').checked=false;setZoom(minZoom*(MAX_ZOOM/minZoom)**(number('zoom')/1000),tracking||focusedStarId?{x:width*.5,y:height*.52}:lastPointer||{x:width/2,y:height/2});});
+  canvas.addEventListener('wheel',e=>{if(!e.deltaY)return;e.preventDefault();$('follow').checked=false;lastPointer=pointerPosition(e);const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?height:1);setZoom(zoom*Math.exp(-delta*.001),tracking||focusedStarId?{x:width*.5,y:height*.52}:lastPointer);},{passive:false});
   canvas.addEventListener('click',e=>{if(suppressMapClick){suppressMapClick=false;return;}
     if(!hiddenLive&&!historyMode){const click=pointerPosition(e);let hit=null,best=Infinity;
       for(const s of displayStates.values()){
@@ -147,12 +152,21 @@
   $('resetView').onclick=()=>{setTracking(false);$('follow').checked=false;lastPointer=null;setZoom(1.2,null,true);};
   holeMarker.onclick=()=>{setTracking(false);$('follow').checked=false;setZoom(zoom,null,true);};
   function setTracking(enabled){
-    tracking=Boolean(enabled&&selectedId);if(tracking)$('follow').checked=false;
+    tracking=Boolean(enabled&&selectedId);if(tracking){clearStellarFocus();$('follow').checked=false;}
     $('trackSelected').textContent=tracking?'退出跟踪':'跟踪卫星';
     $('trackSelected').setAttribute('aria-pressed',String(tracking));
   }
   $('trackSelected').onclick=()=>setTracking(!tracking);
-  $('follow').addEventListener('change',()=>{if($('follow').checked)setTracking(false);});
+  $('follow').addEventListener('change',()=>{if($('follow').checked){setTracking(false);clearStellarFocus();}});
+  function clearStellarFocus(){focusedStarId=null;$('stellarFocus').value='';}
+  for(const star of model.MODEL.stars){const option=document.createElement('option');option.value=star.id;option.textContent=star.name;$('stellarFocus').append(option);}
+  $('stellarFocus').addEventListener('change',()=>{
+    const id=$('stellarFocus').value,star=model.MODEL.stars.find(body=>body.id===id);
+    if(!star){clearStellarFocus();return;}
+    setTracking(false);$('follow').checked=false;focusedStarId=id;
+    const base=OrbitalCamera.view(width,height,1),radius=OrbitalVisuals.stellarAppearance(1,star).radius;
+    if(radius>0&&base.scale>0)setZoom(Math.min(140,width*.14,height*.18)/(radius*base.scale));
+  });
   function observedPosition(id){
     if(sweptIds.has(id))return null;
     const s=displayStates.get(id)||satellites.get(id);if(!s?.state)return null;
@@ -167,18 +181,20 @@
     holeMarker.title=marker.inView?'黑洞中心 · 点击居中':'黑洞在此方向 · 点击定位';
   }
   function compactBodyView(origin={x:0,y:0}){const factor=model.MODEL.rs/171,q=project(origin.x,origin.y);return {...view,cx:q.x,cy:q.y,scale:view.scale*factor,size:view.size*factor};}
-  function holeView(){return compactBodyView();}
+  function holeView(){return OrbitalVisuals.blackHoleAppearance(compactBodyView());}
   function authoritativeFieldTick(){return launchClockTick+Math.max(0,performance.now()-launchClockNow)/1000*model.MODEL.tickRate;}
+  function observationFieldTick(){return observationClockTick+Math.max(0,performance.now()-observationClockNow)/1000*model.MODEL.tickRate;}
   function displayFieldTick(){
     if(historyMode){const selected=satellites.get(selectedId);return (selected?.birthTick??0)+replayElapsed*model.MODEL.tickRate;}
-    return paused?frozenStarTick:authoritativeFieldTick();
+    return paused?frozenStarTick:observationFieldTick();
   }
-  function drawStellarSystem(){
+  function drawStellarSystem(fieldBodies){
     for(const star of model.MODEL.stars)ring(star.orbitRadius,star.color+'1c',.75);
-    for(const star of model.stellarBodiesAtTick(displayFieldTick())){
-      const q=project(star.x,star.y),appearance=OrbitalVisuals.stellarAppearance(view.scale,star);
-      visuals.star(ctx,q,appearance,star);
-      if(appearance.radius>=3&&q.x>10&&q.x<width-90&&q.y>145&&q.y<height-60){ctx.fillStyle=star.color;ctx.font='10px ui-monospace,monospace';ctx.fillText(star.name,q.x+appearance.markerRadius+5,q.y+3);}
+    const bodies=fieldBodies.map(star=>{const q=project(star.x,star.y),appearance=OrbitalVisuals.stellarAppearance(view.scale,star);return {...q,radius:appearance.radius,appearance,star};});
+    if(stellarRenderer.render({bodies,width,height,dpr:Math.min(devicePixelRatio||1,2),time:12+visualTime/.3}))ctx.drawImage(stellarCanvas,0,0,stellarCanvas.width,stellarCanvas.height,0,0,width,height);
+    else for(const body of bodies)visuals.star(ctx,body,body.appearance,body.star,visualTime);
+    for(const {x,y,radius,star} of bodies){
+      if(radius>=3&&x>10&&x<width-90&&y>145&&y<height-60){ctx.fillStyle=star.color;ctx.font='10px ui-monospace,monospace';ctx.fillText(star.name,x+radius+5,y+3);}
     }
   }
   function distanceGrid(){
@@ -194,22 +210,23 @@
   function ring(r,color,lineWidth=1){const pts=[];for(let i=0;i<=180;i++){const a=i/180*Math.PI*2;pts.push({x:r*Math.cos(a),y:r*Math.sin(a)});}line(pts,color,lineWidth);}
   function draw(){
     if(!view)return;ctx.clearRect(0,0,width,height);ctx.fillStyle='#05070c';ctx.fillRect(0,0,width,height);
+    const fieldBodies=model.stellarBodiesAtTick(displayFieldTick());
     backgroundStars.forEach(s=>{ctx.globalAlpha=s.a*(.8+.2*Math.sin(visualTime*.65+s.x*50));ctx.fillStyle='#c6d3ec';ctx.beginPath();ctx.arc(s.x*width,s.y*height,s.r,0,Math.PI*2);ctx.fill();});ctx.globalAlpha=1;
     if($('follow').checked){const s=displayStates.get(selectedId);const point=historyMode?replayPoint(replayElapsed):s?.state;if(point)setZoom(Math.min(zoom,fitPosition(point)),null,true);}
     if(tracking&&selectedId){const p=historyMode?replayPoint(replayElapsed):observedPosition(selectedId);if(p){
       view=OrbitalCamera.followAt(view,{x:p.x,y:-p.y},{x:width*.5,y:height*.52});
       cameraOffset={x:view.cx-width*.54,y:view.cy-height*.49};
     }}
+    if(focusedStarId){const star=fieldBodies.find(body=>body.id===focusedStarId);if(star){view=OrbitalCamera.followAt(view,{x:star.x,y:-star.y},{x:width*.5,y:height*.52});cameraOffset={x:view.cx-width*.54,y:view.cy-height*.49};}}
     updateHoleMarker();
     visuals.blackhole(ctx,width,height,holeView(),visualTime);
     distanceGrid();
-    drawStellarSystem();
+    drawStellarSystem(fieldBodies);
     if(view.scale*model.MODEL.rs>12){ring(model.MODEL.rs,'#a4dba650');const q=project(model.MODEL.rs,0);ctx.fillStyle='#a4dba6';ctx.font='10px ui-monospace,monospace';ctx.fillText('r_s = '+units.formatKm(scale.schwarzschildRadiusKm),q.x+8,q.y+14);}
     if(preview.length&&draftVisible&&!historyMode)line(preview,'#ffaa6680',1,[4,6]);
-    if(historyMode&&exactRenderer.available&&!document.hidden){
-      const rendered=exactRenderer.render({view,width,height,dpr:Math.min(devicePixelRatio||1,2),time:replayElapsed,hidden:document.hidden,segments:exactStore.visibleRanges(replayElapsed)});
-      if(rendered&&exactCanvas.width&&exactCanvas.height)ctx.drawImage(exactCanvas,0,0,exactCanvas.width,exactCanvas.height,0,0,width,height);
-    }
+    const exactVisible=historyMode&&exactRenderer.available&&!document.hidden;
+    exactCanvas.hidden=!exactVisible;
+    if(exactVisible)exactRenderer.render({view,width,height,dpr:Math.min(devicePixelRatio||1,2),time:replayElapsed,hidden:document.hidden,segments:exactStore.visibleRanges(replayElapsed)});
     if(historyMode&&historyPoints.length){const point=replayPoint(replayElapsed),last=historyPoints.at(-1);if(point&&!(last.kind==='captured'&&replayElapsed>=last.elapsedSeconds-1e-9))drawSatellite(point,'回放 / '+(satellites.get(selectedId)?.name||''),true,satellites.get(selectedId)?.massKg||1000);}
     else if(!hiddenLive&&!historyMode){for(const [id,s]of displayStates){
       if(!['active','captured','escaped'].includes(s.status))continue;
@@ -238,7 +255,8 @@
     $('offscreen').hidden=!off;$('coordinateReadout').textContent='WORLD / km · +Y UP';
     const selected=displayStates.get(selectedId)||satellites.get(selectedId),state=historyMode?replayPoint(replayElapsed):observedPosition(selectedId);
     $('telemetryHud').hidden=!state||hiddenLive;
-    if(state&&!hiddenLive){const t=units.telemetry(state,selected?.calibration||scale);$('telemetryHud').textContent=`${tracking?'跟踪 / ':''}${selected?.name||'卫星'} · ${units.formatSpeed(state,selected?.calibration||scale)} · 距中心 ${units.formatKm(t.radiusKm)}`;
+    if(state&&!hiddenLive){if(historyMode)$('telemetryHud').textContent=`回放 / ${selected?.name||'卫星'} · ${replayElapsed.toFixed(2)} 模拟秒`;
+      else{const t=units.telemetry(state,selected?.calibration||scale);$('telemetryHud').textContent=`${tracking?'跟踪 / ':''}${selected?.name||'卫星'} · ${units.formatSpeed(state,selected?.calibration||scale)} · 距中心 ${units.formatKm(t.radiusKm)}`;}
       const q=project(state.x,state.y);if(q.x<15||q.x>width-15||q.y<140||q.y>height-110){const x=Math.max(18,Math.min(width-18,q.x)),y=Math.max(150,Math.min(height-165,q.y));ctx.save();ctx.translate(x,y);ctx.rotate(Math.atan2(q.y-y,q.x-x));ctx.fillStyle='#a4dba6';ctx.beginPath();ctx.moveTo(7,0);ctx.lineTo(-5,-5);ctx.lineTo(-5,5);ctx.closePath();ctx.fill();ctx.restore();}}
   }
   function drawSatellite(state,name,selected,massKg=1000){
@@ -256,7 +274,7 @@
     message(event?.bodyType==='star'?`「${s.name}」撞上恒星「${event.bodyName}」 · 存活 ${s.state.elapsedSeconds.toFixed(3)} 模拟秒`:`「${s.name}」已被黑洞吞噬 · 存活 ${s.state.elapsedSeconds.toFixed(3)} 模拟秒`);
   }
   function replayPoint(time){return history.interpolate(historyPoints,time);}
-  function clearHistory(){historySessionVersion++;historyRequestVersion++;historyController?.abort();exactController?.abort();historyController=null;exactController=null;historyLoading=false;exactLoading=false;exactStarted=false;historyResume=false;historySnapshot=null;historyCutoffSeq=undefined;windowStatus='';exactStatus='';exactStableStatus='';historyCache.clear();exactStore.clear();exactRenderer.clear();historyPoints=[];$('history').disabled=false;$('play').textContent='播放';updateHistoryStatus();}
+  function clearHistory(){historySessionVersion++;historyRequestVersion++;historyController?.abort();exactController?.abort();historyController=null;exactController=null;historyLoading=false;exactLoading=false;exactStarted=false;historyResume=false;historySnapshot=null;historyCutoffSeq=undefined;windowStatus='';exactStatus='';exactStableStatus='';historyCache.clear();exactStore.clear();exactRenderer.clear();exactCanvas.hidden=true;historyPoints=[];$('history').disabled=false;$('play').textContent='播放';updateHistoryStatus();}
   function cachedHistory(time){const tick=Math.min(historySnapshot?.tick??0,time*model.MODEL.tickRate),range=historyCache.range;return !!range&&tick>=range.fromTick&&tick<=range.toTick&&historyCache.contains(time);}
   async function startExactHistory(id,cutoffSeq,expectedPoints,sessionVersion,identity,selection){
     exactController?.abort();exactController=new AbortController();const signal=exactController.signal;
@@ -306,7 +324,7 @@
       historyCutoffSeq=result.cutoffSeq;historyCache.set(result.range,result.points);historyPoints=historyCache.points;
       if(!historyCache.contains(replayElapsed))throw new Error('此时刻尚无可插值的已归档采样点，请稍后重新加载历史。');
       playing=historyResume;historyResume=false;$('play').textContent=playing?'暂停':'播放';
-      windowStatus=`当前窗口 ${historyPoints.length} 个采样点 · 截止 tick ${historySnapshot.tick}。拖动时间轴会按需读取当前位置和速度。${historySnapshot.trajectoryCoverage?.status==='capped'?' 轨迹仅记录到存储上限。':''}`;updateHistoryStatus();
+      windowStatus=`当前窗口 ${historyPoints.length} 个采样点 · 截止 tick ${historySnapshot.tick}。拖动时间轴会按需读取当前位置附近的轨迹数据。${historySnapshot.trajectoryCoverage?.status==='capped'?' 轨迹仅记录到存储上限。':''}`;updateHistoryStatus();
       if(!exactStarted){exactStarted=true;void startExactHistory(id,historyCutoffSeq,historySnapshot.trajectoryCoverage?.lastSeq||historyCutoffSeq,historySessionVersion,identity,selection);}
       updateReplayLabel();return true;
     }catch(e){if(current()){playing=false;historyResume=false;$('play').textContent='播放';windowStatus=e.message;updateHistoryStatus();}return false;}
@@ -363,8 +381,14 @@
   }
   function resetLiveDrawing(){liveObservers.clear();trails.clear();displayStates.clear();for(const s of Array.from(satellites.values()).slice(-100))setLiveRecord(s);const selected=satellites.get(selectedId);if(selected)setLiveRecord(selected);}
   function serverStatus(server){
-    if(Number.isFinite(server?.tick)){if(server.tick<lastServerTick)return false;lastServerTick=server.tick;launchClockTick=server.tick;launchClockNow=performance.now();if(!paused)frozenStarTick=server.tick;}
-    online=true;const lag=Number(server?.lagSeconds||0),nextRecovering=server?.status==='recovering'||lag>2;
+    const lag=Number(server?.lagSeconds||0),nextRecovering=server?.status==='recovering'||lag>2;
+    if(Number.isFinite(server?.tick)){
+      if(server.tick<lastServerTick)return false;
+      // Recovery runs faster than wall time; keep the observed field on its local preview clock.
+      if(lastServerTick<0||!nextRecovering){observationClockTick=server.tick;observationClockNow=performance.now();}
+      lastServerTick=server.tick;launchClockTick=server.tick;launchClockNow=performance.now();
+    }
+    online=true;
     if(recovering&&!nextRecovering&&!paused)resetLiveDrawing();recovering=nextRecovering;
     if(!historyMode&&!paused&&!hiddenLive&&!mapWave)$('viewMode').textContent=recovering?'服务器补算中 · 连续物理预演':'实时观察';
     $('connection').textContent=recovering?`服务已连接 · 正在补算离线轨迹 · 剩余 ${lag.toFixed(1)} 模拟秒`:`服务已连接 · ${server?.status||'running'}${lag>.2?' · 落后 '+lag.toFixed(1)+' 秒':''}`;updateLaunch();
@@ -373,7 +397,7 @@
   function saveText(text,name,type='text/plain'){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
   $('copyKey').onclick=async()=>{try{await navigator.clipboard.writeText(recoveryKey);message('恢复密钥已复制，请保存在安全位置。');}catch{message('无法访问剪贴板，请使用下载密钥。');}};
   $('downloadKey').onclick=()=>saveText('ORBITAL 恢复密钥\n'+recoveryKey+'\n请私密保存。持有密钥可访问和控制此档案的卫星。','orbital-recovery-key.txt');$('dismissKey').onclick=()=>revealKey('');
-  function resetIdentity(){sweepEpoch++;mapWave=null;sweepBusy=false;sweepSending=false;sweptIds.clear();sweepPending.clear();clearHistory();setTracking(false);currentUserId=null;impactWaves=[];seenCaptures.clear();lastServerTick=-1;launchClockTick=0;launchClockNow=performance.now();frozenStarTick=0;paused=false;hiddenLive=false;$('pause').textContent='暂停观察';$('viewMode').textContent='实时观察';identityEpoch++;selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);stream?.close();stream=null;satellites.clear();trails.clear();displayStates.clear();liveObservers.clear();selectedId=null;deletingId=null;historyPoints=[];historyMode=false;playing=false;pendingLaunch=null;nextCursor=null;sessionReady=false;csrf='';revealKey('');$('detail').hidden=true;$('loadMore').hidden=true;$('replay').hidden=true;renderList();}
+  function resetIdentity(){sweepEpoch++;mapWave=null;sweepBusy=false;sweepSending=false;sweptIds.clear();sweepPending.clear();clearHistory();setTracking(false);currentUserId=null;impactWaves=[];seenCaptures.clear();lastServerTick=-1;launchClockTick=0;launchClockNow=performance.now();observationClockTick=0;observationClockNow=performance.now();frozenStarTick=0;paused=false;hiddenLive=false;$('pause').textContent='暂停观察';$('viewMode').textContent='实时观察';identityEpoch++;selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);stream?.close();stream=null;satellites.clear();trails.clear();displayStates.clear();liveObservers.clear();selectedId=null;deletingId=null;historyPoints=[];historyMode=false;playing=false;pendingLaunch=null;nextCursor=null;sessionReady=false;csrf='';revealKey('');$('detail').hidden=true;$('loadMore').hidden=true;$('replay').hidden=true;renderList();}
   async function connect(){if(connecting||identityBusy)return;connecting=true;identityLock(true);let epoch=identityEpoch;online=false;updateLaunch();$('connection').textContent='正在连接计算服务…';try{const session=await api('/api/session/guest',{method:'POST'});if(epoch!==identityEpoch)return;if(currentUserId&&currentUserId!==session.user.id){resetIdentity();epoch=identityEpoch;}currentUserId=session.user.id;csrf=session.csrfToken;sessionReady=true;$('identityLabel').textContent='档案 '+session.user.id;if(session.recoveryKey)revealKey(session.recoveryKey);const config=await api('/api/model');if(epoch!==identityEpoch)return;if((config.model.version||config.model.modelVersion)!==model.MODEL.version||config.model.calibration?.version!==scale.version||config.model.dynamics?.version!==model.MODEL.dynamics.version)throw new Error('浏览器模型或物理标定与服务器版本不一致，请刷新页面。');$('modelVersion').textContent=model.MODEL.dynamics.version;serverStatus(config.server);await loadList(false);if(epoch!==identityEpoch)return;openStream();}catch(e){online=false;$('connection').textContent='服务离线';message(e.message+' 请启动项目的 Node 服务后点击“重新连接”。');}finally{connecting=false;identityLock(false);updateLaunch();}}
   function openStream(){stream?.close();stream=new EventSource('/api/stream'+(selectedId?'?satelliteId='+encodeURIComponent(selectedId):''));const epoch=identityEpoch,subscription=++streamEpoch;stream.addEventListener('snapshot',event=>{if(epoch!==identityEpoch||subscription!==streamEpoch)return;try{const data=JSON.parse(event.data);if(serverStatus(data.server)===false)return;ingest(data.satellites||[]); }catch{message('实时快照无效，请重新连接。');}});stream.onerror=()=>{if(epoch!==identityEpoch||subscription!==streamEpoch)return;online=false;$('connection').textContent='实时连接中断 · 自动重连中';updateLaunch();};}
   function ingest(items){for(const incoming of items){const old=satellites.get(incoming.id),s=history.mergeSnapshot(old,incoming);if(!s)continue;const incomingTick=s.state?.tick??-1,oldTick=old?.state?.tick??-1;if(old&&(incomingTick<oldTick||(incomingTick===oldTick&&!['active','queued'].includes(old.status)&&['active','queued'].includes(s.status))))continue;if(s.status==='captured'&&old&&old.status==='active'&&!paused&&!historyMode&&!recovering)captureVisual(s);
@@ -400,7 +424,7 @@
   async function selectSatellite(id){clearHistory();selectedId=id;setTracking(true);selectionEpoch++;exportEpoch++;clearTimeout(exportTimer);historyPoints=[];historyMode=false;playing=false;impactWaves=[];replayCaptureShown=false;$('replay').hidden=true;$('downloadExport').hidden=true;$('historyMessage').textContent='';$('viewMode').textContent=paused?'观察已暂停 · 服务继续运行':'实时观察';hiddenLive=false;if(online&&sessionReady)openStream();renderList();renderDetail();const epoch=selectionEpoch;try{const data=await api('/api/satellites/'+encodeURIComponent(id));if(epoch===selectionEpoch)ingest([data.satellite]);}catch(e){if(epoch===selectionEpoch)message(e.message);}}
   $('launchForm').onsubmit=async e=>{e.preventDefault();if(launchBusy||!draft||!online||!sessionReady)return;const epoch=identityEpoch;launchBusy=true;if(!pendingLaunch)pendingLaunch={...readInput(),idempotencyKey:crypto.randomUUID()};updateLaunch();$('launchMessage').textContent='正在提交并保存出生档案…';try{const data=await api('/api/satellites',{method:'POST',body:JSON.stringify(pendingLaunch)});if(epoch!==identityEpoch)return;pendingLaunch=null;draftVisible=false;preview=[];previewToken++;ingest([data.satellite]);selectSatellite(data.satellite.id);$('launchMessage').textContent='发射已确认 · '+data.satellite.id;hiddenLive=false;}catch(error){if(epoch!==identityEpoch)return;if(error.status&&error.status<500&&error.status!==408&&error.status!==429)pendingLaunch=null;$('launchMessage').textContent=error.message+(pendingLaunch?' · 结果尚未确认，再次点击将安全重试同一发射。':'');}finally{launchBusy=false;updateLaunch();}};
   $('reconnect').onclick=connect;$('refresh').onclick=()=>loadList(false);$('loadMore').onclick=()=>loadList(true);
-  $('pause').onclick=()=>{if(!paused)frozenStarTick=authoritativeFieldTick();paused=!paused;$('pause').textContent=paused?'继续观察':'暂停观察';$('viewMode').textContent=paused?'观察已暂停 · 服务继续运行':'实时观察';if(!paused){for(const s of satellites.values()){const shown=displayStates.get(s.id);if(s.status==='captured'&&shown?.status==='active')captureVisual(s);}resetLiveDrawing();}};$('clear').onclick=()=>{clearHistory();$('replay').hidden=true;hiddenLive=true;historyMode=false;playing=false;$('viewMode').textContent='卫星已隐藏';message('已隐藏观察对象；没有停止计算或删除档案。');};$('showAll').onclick=()=>{clearHistory();$('replay').hidden=true;hiddenLive=false;historyMode=false;playing=false;$('viewMode').textContent=paused?'观察已暂停':'实时观察';};
+  $('pause').onclick=()=>{if(!paused)frozenStarTick=observationFieldTick();paused=!paused;$('pause').textContent=paused?'继续观察':'暂停观察';$('viewMode').textContent=paused?'观察已暂停 · 服务继续运行':'实时观察';if(!paused){observationClockTick=authoritativeFieldTick();observationClockNow=performance.now();for(const s of satellites.values()){const shown=displayStates.get(s.id);if(s.status==='captured'&&shown?.status==='active')captureVisual(s);}resetLiveDrawing();}};$('clear').onclick=()=>{clearHistory();$('replay').hidden=true;hiddenLive=true;historyMode=false;playing=false;$('viewMode').textContent='卫星已隐藏';message('已隐藏观察对象；没有停止计算或删除档案。');};$('showAll').onclick=()=>{clearHistory();$('replay').hidden=true;hiddenLive=false;historyMode=false;playing=false;$('viewMode').textContent=paused?'观察已暂停':'实时观察';};
   $('recover').onclick=async()=>{const key=$('recoverInput').value.trim();if(!key||identityBusy)return;identityLock(true);try{const data=await api('/api/session/recover',{method:'POST',body:JSON.stringify({recoveryKey:key})});resetIdentity();currentUserId=data.user.id;csrf=data.csrfToken;sessionReady=true;online=true;revealKey(data.recoveryKey);$('recoverInput').value='';$('identityLabel').textContent='档案 '+data.user.id;await loadList();openStream();message('档案已恢复，无需更换原密钥。');}catch(e){message(e.message);}finally{identityLock(false);updateLaunch();}};
   $('rotateKey').onclick=async()=>{if(identityBusy)return;if(!sessionReady){message('请先重新连接，或恢复已有档案。');return;}if(!confirm('生成新的恢复密钥后，旧密钥将立即失效。继续？'))return;identityLock(true);try{const data=await api('/api/session/recovery-key',{method:'POST',body:'{}'});revealKey(data.recoveryKey);message('恢复密钥已轮换。请立即保存新密钥。');}catch(e){message(e.message);}finally{identityLock(false);}};
   $('logout').onclick=async()=>{if(identityBusy)return;identityLock(true);try{await api('/api/session',{method:'DELETE'});resetIdentity();online=false;$('identityLabel').textContent='已退出档案';$('connection').textContent='已退出';message('已退出，服务器继续计算。点击重新连接可建立新访客档案，或恢复已有档案。');updateLaunch();}catch(e){message(e.message);}finally{identityLock(false);}};
@@ -426,7 +450,7 @@
     const life=history.lifecycle(historySnapshot,model.MODEL.tickRate);$('timeline').min=0;$('timeline').max=life.endSeconds;$('timeline').value=0;$('replay').hidden=false;$('viewMode').textContent='历史回放';
     await requestHistory(0);
   };
-  function updateReplayLabel(){const point=replayPoint(replayElapsed);$('replayTime').textContent=replayElapsed.toFixed(2)+' 模拟秒'+(point?' · '+units.formatSpeed(point,satellites.get(selectedId)?.calibration||scale):'');}
+  function updateReplayLabel(){$('replayTime').textContent=replayElapsed.toFixed(2)+' 模拟秒';}
   $('timeline').oninput=()=>{requestHistory(number('timeline'),playing||historyResume);};
   $('play').onclick=()=>{
     if(historyLoading){historyResume=!historyResume;$('play').textContent=historyResume?'暂停':'播放';return;}

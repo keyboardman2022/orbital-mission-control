@@ -4,7 +4,7 @@ const {mkdtempSync,rmSync}=require('node:fs');
 const {tmpdir}=require('node:os');
 const {join}=require('node:path');
 const {startServer}=require('../server/index.js');
-const initial={name:'测试卫星',position:{x:330,y:0},massKg:1000,speed:97.3,directionDeg:90,modelVersion:'pw-2d-v1',dynamicsVersion:'multi-attractor-pw-v1',idempotencyKey:'api-launch-00001'};
+const initial={name:'测试卫星',position:{x:330,y:0},massKg:1000,speed:97.3,directionDeg:90,modelVersion:'pw-2d-v3',dynamicsVersion:'multi-attractor-pw-v1',idempotencyKey:'api-launch-00001'};
 test('HTTP launch, ownership, CSRF, persistence, pagination, recovery and exports',async t=>{
  const dir=mkdtempSync(join(tmpdir(),'orbital-api-'));let app=await startServer({port:0,dataDir:dir});
  t.after(async()=>{await app.close();rmSync(dir,{recursive:true,force:true});});
@@ -14,6 +14,8 @@ test('HTTP launch, ownership, CSRF, persistence, pagination, recovery and export
  }
  const historyScript=await request('/history-webgl.js');assert.equal(historyScript.res.status,200);assert.match(historyScript.res.headers.get('content-type'),/text\/javascript/);assert.match(historyScript.data,/OrbitalHistoryGL/);
  const missionPage=await request('/mission.html');assert.ok(missionPage.data.indexOf('history-webgl.js')<missionPage.data.indexOf('mission.js'));
+ assert.ok(missionPage.data.indexOf('stellar-renderer.js')<missionPage.data.indexOf('mission.js'));
+ const stellarAsset=await request('/stellar-renderer.js');assert.equal(stellarAsset.res.status,200);assert.match(stellarAsset.res.headers.get('content-type'),/text\/javascript/);
  const ga=await request('/api/session/guest',{method:'POST',body:{}}),a={cookie:ga.res.headers.get('set-cookie').split(';')[0],csrfToken:ga.data.csrfToken};
  assert.equal(ga.res.status,200);assert.ok(ga.data.recoveryKey);
  const gb=await request('/api/session/guest',{method:'POST',body:{}}),b={cookie:gb.res.headers.get('set-cookie').split(';')[0],csrfToken:gb.data.csrfToken};

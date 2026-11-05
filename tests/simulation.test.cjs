@@ -9,7 +9,7 @@ const run = (s,n) => {for(let i=0;i<n;i++)P.step(s);return s;};
 test('browser and Node expose the same fixed model',()=>{
   const context={};vm.runInNewContext(fs.readFileSync(require.resolve('../shared/units.js'),'utf8'),context);
   vm.runInNewContext(fs.readFileSync(require.resolve('../shared/simulation.js'),'utf8'),context);
-  assert.equal(context.OrbitalModel.MODEL.version,'pw-2d-v1');
+  assert.equal(context.OrbitalModel.MODEL.version,'pw-2d-v3');
   assert.equal(P.MODEL.step,1/240);
   assert.equal(context.OrbitalModel.MODEL.calibration.kmPerUnit,P.MODEL.calibration.kmPerUnit);
 });

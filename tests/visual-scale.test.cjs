@@ -20,13 +20,67 @@ test('satellite and trail do not add brightness; unresolved far objects produce 
  assert.ok(ctx.strokes.every(s=>s.blend==='source-over'&&s.width<.8&&s.opacity<.1));
  const count=ctx.strokes.length;V.renderTrail(ctx,points,project,3,1e-7);assert.equal(ctx.strokes.length,count);
 });
-test('orbiting stars retain a readable core while their physical glow scales with zoom',()=>{
+test('orbiting star cores and physical glow both scale with zoom',()=>{
  const near=V.stellarAppearance(1,{collisionRadius:20}),far=V.stellarAppearance(.01,{collisionRadius:20});
- assert.equal(near.radius,20);assert.equal(far.radius,.2);
- assert.ok(near.markerRadius>=3&&far.markerRadius>=3);
+ assert.equal(near.physicalRadius,20);assert.equal(far.physicalRadius,.2);
+ assert.ok(Math.abs(near.radius/far.radius-100)<1e-10);
+ assert.equal(near.markerRadius,near.radius);
+ assert.ok(far.markerRadius>0&&far.markerRadius<5);
  const ctx=context(),arcs=[];ctx.arc=(x,y,r)=>arcs.push({x,y,r});ctx.fill=()=>{};
- V.renderStar(ctx,{x:40,y:50},far,{color:'#fff0b8'});
+ V.renderStar(ctx,{x:40,y:50},far,{id:'aurora',color:'#fff0b8'},2);
  assert.ok(arcs.some(arc=>arc.x===40&&arc.y===50&&arc.r===far.markerRadius));
+});
+test('distant-map star markers preserve the underlying stellar size hierarchy',()=>{
+ const compact=V.stellarAppearance(.0001,{collisionRadius:12});
+ const supergiant=V.stellarAppearance(.0001,{collisionRadius:84});
+ assert.ok(supergiant.markerRadius>compact.markerRadius);
+ assert.ok(compact.markerRadius>0&&supergiant.markerRadius<2);
+});
+test('stellar markers respond continuously across successive zoom levels',()=>{
+ const star={collisionRadius:52};
+ const far=V.stellarAppearance(.002,star),middle=V.stellarAppearance(.008,star),near=V.stellarAppearance(.032,star);
+ assert.ok(far.markerRadius<middle.markerRadius&&middle.markerRadius<near.markerRadius);
+ assert.ok(middle.markerRadius>far.markerRadius*1.7);
+ assert.ok(near.markerRadius>middle.markerRadius*1.7);
+});
+test('unresolved stellar light fades with its coverage and has no fixed-pixel ornaments',()=>{
+ const ctx=context(),arcs=[];ctx.arc=(x,y,r)=>arcs.push({x,y,r});ctx.fill=()=>{};
+ const appearance=V.stellarAppearance(.0001,{collisionRadius:84});
+ V.renderStar(ctx,{x:40,y:50},appearance,{id:'colossus',color:'#ff5f67'},2);
+ const offset=arc=>Math.hypot(arc.x-40,arc.y-50);
+ assert.ok(appearance.opacity<.001);
+ assert.ok(arcs.every(arc=>arc.r<=appearance.radius*2.8&&offset(arc)<=appearance.radius));
+ assert.ok(ctx.strokes.every(stroke=>stroke.width<=appearance.radius*.05));
+});
+test('stellar close-up grows linearly instead of clamping the surface to a tiny marker',()=>{
+ const star={collisionRadius:84};
+ const near=V.stellarAppearance(1,star),extreme=V.stellarAppearance(100,star);
+ assert.ok(Math.abs(extreme.markerRadius/near.markerRadius-100)<1e-10);
+ assert.ok(extreme.markerRadius>1000);
+});
+test('all approved stellar sizes retain their preview ratio to the unchanged black-hole shadow',()=>{
+ const stars=require('../shared/simulation.js').MODEL.stars;
+ for(const star of stars)for(const scale of[1e-6,.01,1,64]){
+   const appearance=V.stellarAppearance(scale,star),hole=66*1.65*scale;
+   assert.ok(hole/appearance.radius>=4.8-1e-10&&hole/appearance.radius<=10.6);
+ }
+ assert.ok(Math.abs(V.stellarAppearance(1,stars.at(-1)).radius-22.6875)<1e-10);
+});
+
+test('black-hole appearance enlarges only the rendered view',()=>{
+ const physical={cx:420,cy:240,size:300,scale:.5};
+ const visual=V.blackHoleAppearance(physical);
+ assert.deepEqual({cx:visual.cx,cy:visual.cy},{cx:420,cy:240});
+ assert.equal(visual.scale,.825);assert.equal(visual.size,495);
+ assert.deepEqual(physical,{cx:420,cy:240,size:300,scale:.5});
+});
+test('the Canvas fallback draws a stellar disc without orbiting decorative particles',()=>{
+ const ctx=context(),arcs=[];ctx.arc=(x,y,r)=>arcs.push({x,y,r});ctx.fill=()=>{};
+ const appearance=V.stellarAppearance(.5,{collisionRadius:20});
+ V.renderStar(ctx,{x:40,y:50},appearance,{id:'ember',color:'#ffd39a'},3);
+ const particles=arcs.filter(arc=>Math.hypot(arc.x-40,arc.y-50)>appearance.markerRadius);
+ assert.equal(particles.length,0);
+ assert.ok(arcs.some(arc=>arc.r===appearance.radius));
 });
 test('map impact uses camera projection so zooming out shrinks its radius and thickness',()=>{
  const ctx=context(),arcs=[];ctx.arc=(x,y,r)=>arcs.push({x,y,r});ctx.fill=()=>{};

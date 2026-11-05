@@ -122,32 +122,34 @@ test('loadExact stops before dispatch when aborted',async()=>{
   assert.equal(calls,0);
 });
 
-async function missionHarness(status='terminated',trajectoryCoverage=null,{webglAvailable=true,workerAvailable=false}={}){
-  const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js');
-  const nodes=new Map(),requests=[],frames=[],streams=[],workerMessages=[],liveRenders=[],liveTrails=[],starRenders=[],impactRenders=[],sweepRequests=[],deleteRequests=[],confirmations=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):()=>{}});let performanceNow=0;
-  const exact={pages:[],renders:[],clearCount:0,destroyCount:0};
+async function missionHarness(status='terminated',trajectoryCoverage=null,{webglAvailable=true,workerAvailable=false,stellarAvailable=false,performanceStep=0,initialServer={tick:1}}={}){
+  const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js'),visualModule=require('../orbital-visuals.js');
+  const nodes=new Map(),requests=[],frames=[],streams=[],workerMessages=[],liveRenders=[],liveTrails=[],starRenders=[],impactRenders=[],sweepRequests=[],deleteRequests=[],confirmations=[],drawImages=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):key==='drawImage'?(...args)=>drawImages.push(args):()=>{}});let performanceNow=0;
+  const exact={pages:[],renders:[],clearCount:0,destroyCount:0,canvas:null},stellar={frames:[],canvas:null};
   const exactStore={pointCount:0,append(points){this.pointCount+=points.length;exact.pages.push(points);return {base:this.pointCount-points.length,length:points.length};},visibleRanges(){return this.pointCount>1?[{start:0,count:this.pointCount}]:[];},clear(){this.pointCount=0;}};
-  const OrbitalHistoryGL={HARD_MAX_POINTS:409600,createStore:()=>exactStore,createRenderer:()=>({available:webglAvailable,append(){},render(input){exact.renders.push(input);return true;},clear(){exact.clearCount++;},destroy(){exact.destroyCount++;}})};
-  function node(id){if(nodes.has(id))return nodes.get(id);let value='';const handlers={};const result={id,children:[],style:{},dataset:{},checked:false,hidden:false,disabled:false,textContent:'',get value(){return value;},set value(v){value=String(v);},setAttribute(){},removeAttribute(){},addEventListener(type,fn){handlers[type]=fn;},dispatch(type,event={}){handlers[type]?.(event);},after(){},remove(){},append(...items){this.children.push(...items);},querySelector(selector){return node(id+selector);},getContext(){return context2d;},getBoundingClientRect(){return {width:1000,height:800,left:0,top:0};},classList:{toggle(){},add(){},remove(){}}};nodes.set(id,result);return result;}
+  const OrbitalHistoryGL={HARD_MAX_POINTS:409600,createStore:()=>exactStore,createRenderer:canvas=>{exact.canvas=canvas;return {available:webglAvailable,append(){},render(input){exact.renders.push(input);return true;},clear(){exact.clearCount++;},destroy(){exact.destroyCount++;}}}};
+  function node(id){if(nodes.has(id))return nodes.get(id);let value='';const handlers={};const result={id,children:[],afterItems:[],attributes:{},style:{},dataset:{},checked:false,hidden:false,disabled:false,textContent:'',get value(){return value;},set value(v){value=String(v);},setAttribute(name,attributeValue){this.attributes[name]=String(attributeValue);},removeAttribute(name){delete this.attributes[name];},addEventListener(type,fn){handlers[type]=fn;},dispatch(type,event={}){handlers[type]?.(event);},after(...items){this.afterItems.push(...items);},remove(){},append(...items){this.children.push(...items);},querySelector(selector){return node(id+selector);},getContext(){return context2d;},getBoundingClientRect(){return {width:1000,height:800,left:0,top:0};},classList:{toggle(){},add(){},remove(){}}};nodes.set(id,result);return result;}
   for(const [id,value]of Object.entries({name:'',x:units.toKm(500),y:0,massKg:1000,speed:0,directionDeg:0,rate:1}))node(id).value=value;
   const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1},...(trajectoryCoverage?{trajectoryCoverage}:{})};
   node('exportJson').dataset.export='json';
   const reply=data=>({ok:true,json:async()=>data});
-  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalHistoryGL,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},star(_ctx,point,appearance,body){starRenders.push({point,appearance,body});},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(_ctx,impactView,age,mass,angle){impactRenders.push({impactView,age,mass,angle});},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0}),stellarAppearance:(scale,body)=>({radius:body.collisionRadius*scale,markerRadius:3})},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},confirm:text=>{confirmations.push(text);return true;},performance:{now:()=>performanceNow},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},...(workerAvailable?{Worker:class{postMessage(message){workerMessages.push(message);}}}:{}),devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:fn=>{if(workerAvailable)fn();return 0;},clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
+  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalHistoryGL,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},star(_ctx,point,appearance,body){starRenders.push({point,appearance,body});},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(_ctx,impactView,age,mass,angle){impactRenders.push({impactView,age,mass,angle});},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0}),stellarAppearance:(scale,body)=>({radius:body.collisionRadius*scale,markerRadius:3}),blackHoleAppearance:visualModule.blackHoleAppearance},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},confirm:text=>{confirmations.push(text);return true;},performance:{now:()=>performanceNow},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},...(workerAvailable?{Worker:class{postMessage(message){workerMessages.push(message);}}}:{}),devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:fn=>{if(workerAvailable)fn();return 0;},clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
     if(path.includes('/trajectory?'))return new Promise(resolve=>requests.push({path,options,resolve:data=>resolve(reply(data))}));
     if(path==='/api/session/guest')return reply({user:{id:'user'},csrfToken:'token'});
-    if(path==='/api/model')return reply({model:model.MODEL,server:{tick:1}});
-    if(path==='/api/satellites')return reply({satellites:[satellite],server:{tick:1},nextCursor:null});
+    if(path==='/api/model')return reply({model:model.MODEL,server:initialServer});
+    if(path==='/api/satellites')return reply({satellites:[satellite],server:initialServer,nextCursor:null});
     if(path==='/api/satellites/active')return reply({satellites:[satellite],server:{tick:1}});
     if(path==='/api/satellites/terminate-many'){sweepRequests.push(JSON.parse(options.body));return reply({satellites:[{...satellite,status:'terminated'}]});}
     if(path==='/api/satellites/one'&&options?.method==='DELETE')return new Promise(resolve=>deleteRequests.push({path,options,resolve:()=>resolve(reply({deleted:{id:'one'}}))}));
     if(path==='/api/satellites/one/exports')return reply({export:{id:'export-one',format:'json',status:'ready',cutoffTick:trajectoryCoverage?.endTick??satellite.state.tick,trajectoryCoverage}});
     return reply({satellite});
   }};
+  sandbox.performance.now=()=>{const now=performanceNow;performanceNow+=performanceStep;return now;};
+  sandbox.OrbitalStellar={createRenderer:canvas=>{stellar.canvas=canvas;return {available:stellarAvailable,render(input){stellar.frames.push(input);return stellarAvailable;},destroy(){}};}};
   vm.runInNewContext(fs.readFileSync(require.resolve('../mission.js'),'utf8'),sandbox);
   const flush=()=>new Promise(resolve=>setImmediate(resolve));await flush();
   await node('satellites').children[0].onclick();
-  return {node,requests,flush,frames,streams,workerMessages,setPerformanceNow:value=>{performanceNow=value;},satellite,liveRenders,liveTrails,starRenders,impactRenders,sweepRequests,deleteRequests,confirmations,exact};
+  return {node,requests,flush,frames,streams,workerMessages,setPerformanceNow:value=>{performanceNow=value;},satellite,liveRenders,liveTrails,starRenders,impactRenders,sweepRequests,deleteRequests,confirmations,drawImages,exact,stellar};
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
@@ -220,7 +222,7 @@ test('mission removes an outward satellite from the map and labels its archive a
 
 test('mission draws all prescribed stars and centers a stellar capture effect on the impacted star',async()=>{
  const h=await missionHarness('active');h.frames[0](16);
- assert.equal(h.starRenders.length,4);
+ assert.equal(h.starRenders.length,9);
  const event={type:'captured',bodyType:'star',bodyId:'ember',bodyName:'烬星',bodyX:420,bodyY:25,fieldTick:2,substepFraction:.5,x:404,y:25,elapsedSeconds:1};
  const captured={...h.satellite,status:'captured',endReason:'captured',state:{...h.satellite.state,status:'captured',event}};
  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[captured],server:{tick:2,status:'running'}})});
@@ -233,12 +235,62 @@ test('mission draws all prescribed stars and centers a stellar capture effect on
  assert.equal(hole,undefined);
 });
 
+test('mission composites the procedural field and keeps stellar close-ups centered without changing orbit data',async()=>{
+  const h=await missionHarness('active',null,{stellarAvailable:true});
+  h.node('stellarFocus').value='ember';h.node('stellarFocus').dispatch('change');h.frames[0](0);
+  assert.ok(h.stellar.frames.length>0);assert.equal(h.stellar.frames.at(-1).bodies.length,9);
+  const first=h.stellar.frames.at(-1).bodies.find(b=>b.star.id==='ember');
+  assert.ok(Math.abs(first.x-500)<1e-8&&Math.abs(first.y-416)<1e-8);
+  assert.ok(h.drawImages.some(args=>args[0]===h.stellar.canvas));
+  assert.equal(h.starRenders.length,0);assert.equal(h.node('trackSelected').attributes['aria-pressed'],'false');
+  h.setPerformanceNow(200);h.frames[1](200);const moved=h.stellar.frames.at(-1).bodies.find(b=>b.star.id==='ember');
+  assert.ok(Math.abs(moved.x-500)<1e-8&&Math.abs(moved.y-416)<1e-8);
+  assert.notEqual(first.star.x,moved.star.x);
+  h.node('universe').dispatch('keydown',{key:'ArrowLeft',preventDefault(){}});
+  assert.equal(h.node('stellarFocus').value,'');
+  h.node('stellarFocus').value='colossus';h.node('stellarFocus').dispatch('change');
+  h.node('resetView').onclick();assert.equal(h.node('stellarFocus').value,'');
+  h.node('zoom').value=1000;h.node('zoom').dispatch('input');assert.equal(h.node('zoomValue').textContent,'6400%');
+});
+
+test('stellar close-up and its surface share one world phase even when drawing takes time',async()=>{
+  const h=await missionHarness('active',null,{stellarAvailable:true,performanceStep:20});
+  h.node('stellarFocus').value='ember';h.node('stellarFocus').dispatch('change');h.frames[0](0);
+  const body=h.stellar.frames.at(-1).bodies.find(b=>b.star.id==='ember');
+  assert.ok(Math.hypot(body.x-500,body.y-416)<1e-8,'the close-up must not drift between camera placement and surface drawing');
+});
+
 test('paused observation keeps launch prediction synchronized to the latest server world tick',async()=>{
  const h=await missionHarness('active',null,{workerAvailable:true});h.workerMessages.length=0;
   h.node('pause').onclick();h.setPerformanceNow(10000);
   h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[],server:{tick:2401,status:'running'}})});
  h.node('predict').checked=true;h.node('x').dispatch('input');
   assert.equal(h.workerMessages.at(-1).fieldTick,2401);
+});
+
+test('stellar observation advances smoothly while recovery packets jump ahead and prediction stays authoritative',async()=>{
+  const h=await missionHarness('active',null,{workerAvailable:true,initialServer:{tick:240000,status:'recovering',lagSeconds:1000000}});
+  const star=()=>h.starRenders.findLast(item=>item.body.id==='ember').body;
+  const distance=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+  h.frames[0](0);const initial=star();
+  const M=require('../shared/simulation.js'),expected=M.stellarBodiesAtTick(240000)[0];
+  assert.ok(distance(initial,expected)<1e-8,'initial observation uses the persisted world phase');
+  h.setPerformanceNow(200);h.frames[1](200);const before=star();
+  assert.ok(distance(initial,before)>1&&distance(initial,before)<20,'stars advance by wall time');
+  for(let i=1;i<=3;i++){
+    h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[],server:{tick:240000+i*8880,status:'recovering',lagSeconds:1000000-i*37}})});
+    h.frames[i+1](200);
+    assert.ok(distance(before,star())<1e-8,'catch-up packets must not teleport the observed stars');
+  }
+  h.node('predict').checked=true;h.node('x').dispatch('input');
+  assert.equal(h.workerMessages.at(-1).fieldTick,266640,'launch prediction follows the actual server clock');
+  h.setPerformanceNow(400);h.frames[5](400);
+  assert.ok(distance(before,star())>1&&distance(before,star())<20,'observation keeps moving between packets');
+  h.node('pause').onclick();h.frames[6](400);const paused=star();
+  h.setPerformanceNow(1400);
+  h.streams.at(-1).snapshot({data:JSON.stringify({satellites:[],server:{tick:300000,status:'recovering',lagSeconds:900000}})});
+  h.frames[7](1400);
+  assert.ok(distance(paused,star())<1e-8,'pause keeps the observed phase fixed');
 });
 
 test('mission rapid seeks abort older windows and ignore their late responses',async()=>{
@@ -419,6 +471,43 @@ test('mission streams the fixed-cutoff full history independently from local cac
   assert.equal(h.exact.pages.flat().length,20);assert.match(h.node('historyMessage').textContent,/完整精确轨迹/);
 });
 
+test('historical replay omits velocity and center distance while live telemetry keeps them',async()=>{
+  const h=await missionHarness('active');h.frames[0](16);
+  assert.match(h.node('telemetryHud').textContent,/距中心/);
+  assert.match(h.node('telemetryHud').textContent,/km\/s/);
+  const opening=h.node('history').onclick();
+  h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:10});await opening;
+  h.frames[1](32);
+  assert.equal(h.node('telemetryHud').textContent,'回放 / 卫星 · 0.00 模拟秒');
+  assert.equal(h.node('replayTime').textContent,'0.00 模拟秒');
+  assert.doesNotMatch(h.node('historyMessage').textContent,/速度|距中心/);
+  assert.match(h.node('detailSpeed').textContent,/速度/);
+  assert.match(h.node('satellites').children[0].children[1].textContent,/速度/);
+  h.node('timeline').value=5;h.node('timeline').oninput();h.frames[2](48);
+  assert.equal(h.node('telemetryHud').textContent,'回放 / 卫星 · 5.00 模拟秒');
+  assert.equal(h.node('replayTime').textContent,'5.00 模拟秒');
+  assert.doesNotMatch(h.node('telemetryHud').textContent,/km\/s|距中心/);
+  h.node('live').onclick();h.frames[3](64);
+  assert.match(h.node('telemetryHud').textContent,/距中心/);
+  assert.match(h.node('telemetryHud').textContent,/km\/s/);
+});
+
+test('mission composites exact history as a dedicated DOM layer without copying it into the 2D canvas',async()=>{
+  const h=await missionHarness(),opening=h.node('history').onclick();
+  assert.equal(h.exact.canvas.id,'historyTrajectory');
+  assert.ok(h.node('universe').afterItems.includes(h.exact.canvas));
+  assert.equal(h.exact.canvas.attributes['aria-hidden'],'true');
+  assert.deepEqual({...h.exact.canvas.style},{position:'absolute',inset:'0',width:'100%',height:'100%',pointerEvents:'none',cursor:'default'});
+  h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:10});await h.flush();
+  h.requests[1].resolve({points:exactPoints(1,10),nextCursor:null,cutoffSeq:10});await h.flush();await opening;
+  h.frames[0](16);
+  assert.equal(h.exact.canvas.hidden,false);
+  assert.ok(h.exact.renders.length>0);
+  assert.equal(h.drawImages.length,0);
+  h.node('live').onclick();
+  assert.equal(h.exact.canvas.hidden,true);
+});
+
 test('leaving replay aborts exact loading and ignores a late page',async()=>{
   const h=await missionHarness(),opening=h.node('history').onclick();
   h.requests[0].resolve({points:windowPoints(0,2),nextCursor:null,cutoffSeq:20});await h.flush();
@@ -445,5 +534,7 @@ test('switching satellites and deleting the selected record reject late exact pa
 test('WebGL unavailable keeps local replay and shows a clear explanation',async()=>{
   const h=await missionHarness('active',null,{webglAvailable:false}),opening=h.node('history').onclick();
   h.requests[0].resolve({points:windowPoints(0,10),nextCursor:null,cutoffSeq:10});await opening;
+  h.frames[0](16);
+  assert.equal(h.exact.canvas.hidden,true);
   assert.equal(h.node('replay').hidden,false);assert.match(h.node('historyMessage').textContent,/不支持完整精确轨迹/);
 });

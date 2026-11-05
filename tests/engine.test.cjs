@@ -5,7 +5,7 @@ const {tmpdir}=require('node:os');
 const {join}=require('node:path');
 const {Engine}=require('../server/engine.js');
 const {archiveBatch,archivePath}=require('../server/trajectory-store.js');
-const launch={name:'Voyager',position:{x:330,y:0},massKg:1000,speed:97.31236802019037,directionDeg:90,modelVersion:'pw-2d-v1',dynamicsVersion:'multi-attractor-pw-v1',idempotencyKey:'test-request-0001'};
+const launch={name:'Voyager',position:{x:330,y:0},massKg:1000,speed:97.31236802019037,directionDeg:90,modelVersion:'pw-2d-v3',dynamicsVersion:'multi-attractor-pw-v1',idempotencyKey:'test-request-0001'};
 function fixture(t){const dir=mkdtempSync(join(tmpdir(),'orbital-engine-')),engines=[];t.after(()=>{for(const e of engines)e.close();rmSync(dir,{recursive:true,force:true});});let now=100000;const file=join(dir,'test.sqlite');const make=()=>{const e=new Engine({filename:file,now:()=>now});engines.push(e);return e;};return {file,make,setNow:n=>now=n};}
 
 test('observable boundary is ten times farther while shockwave speed stays fixed',()=>{

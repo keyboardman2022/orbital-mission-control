@@ -11,8 +11,8 @@ const launch=(extra={})=>({
   dynamicsVersion:M.MODEL.dynamics.version,...extra
 });
 
-test('four prescribed stars keep their circular black-hole orbits on the shared world clock',()=>{
-  assert.equal(M.MODEL.stars.length,4);
+test('nine prescribed stars keep their circular black-hole orbits on the shared world clock',()=>{
+  assert.equal(M.MODEL.stars.length,9);
   const start=M.stellarBodiesAtTick(0);
   for(const star of start){
     assert.ok(Math.abs(Math.hypot(star.x,star.y)-star.orbitRadius)<1e-10);
@@ -20,6 +20,23 @@ test('four prescribed stars keep their circular black-hole orbits on the shared 
     assert.ok(Math.abs(quarter.x+star.y)<1e-8);
     assert.ok(Math.abs(quarter.y-star.x)<1e-8);
   }
+});
+
+test('neighboring stellar orbits leave a monumental amount of open space',()=>{
+  const radii=M.MODEL.stars.map(star=>star.orbitRadius).sort((a,b)=>a-b);
+  const gaps=radii.slice(1).map((radius,index)=>radius-radii[index]);
+  assert.ok(gaps.every(gap=>gap>=500),`expected every orbit gap to be at least 500 scene units, got ${gaps.join(', ')}`);
+  assert.ok(radii.at(-1)>=75000,'expected several stars to extend into the remote edge of the observable field');
+  assert.ok(radii.at(-1)<M.MODEL.observation.radius,'outer stars must remain inside the observable field');
+});
+
+test('remote stars orbit much more slowly and the stellar population is visibly diverse',()=>{
+  const stars=[...M.MODEL.stars].sort((a,b)=>a.orbitRadius-b.orbitRadius);
+  assert.ok(stars.at(-1).periodTicks>stars[0].periodTicks*50,'outermost star should take far longer to orbit');
+  const radii=stars.map(star=>star.collisionRadius),masses=stars.map(star=>star.massRatio);
+  assert.ok(Math.max(...radii)/Math.min(...radii)>=5,'stellar sizes should span at least fivefold');
+  assert.ok(Math.max(...masses)/Math.min(...masses)>=10,'stellar masses should span at least tenfold');
+  assert.ok(new Set(stars.map(star=>star.color)).size>=7,'stellar colors should be substantially varied');
 });
 
 test('multi-attractor acceleration adds stellar gravity without moving the prescribed stars',()=>{
