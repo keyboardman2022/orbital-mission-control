@@ -5,24 +5,21 @@ const M=require('../shared/simulation.js');
 const wallOrigin=Date.now(),monoOrigin=performance.now();
 const engine=new Engine({filename:workerData.filename,now:()=>wallOrigin+performance.now()-monoOrigin,maxActive:workerData.maxActive,velocityRelativeTolerance:workerData.velocityRelativeTolerance});
 engine.interruptExports();
-let lastCommit=performance.now(),lastArchive=performance.now(),lastWall=Date.now(),lastMono=performance.now();
+let lastCommit=performance.now(),lastArchive=performance.now(),lastMono=performance.now();
 const timer=setInterval(()=>{
   try{
-    const wall=Date.now(),mono=performance.now();
-    if(Math.abs((wall-lastWall)-(mono-lastMono))>1000)engine.clockError='检测到系统时钟跳变，请校准时钟后重启服务';
-    lastWall=wall;lastMono=mono;
-    engine.advanceTo(engine.targetTick(),{maxSteps:2400,budgetMs:12});
+    const mono=performance.now(),elapsed=Math.max(0,(mono-lastMono)/1000);lastMono=mono;
+    engine.advanceRealtime(elapsed,{budgetMs:12});
     if(mono-lastCommit>=1000||engine.pending.length>=10000){engine.checkpoint();lastCommit=mono;}
-    if(mono-lastArchive>=1000&&engine.tick>=86400*M.MODEL.tickRate&&engine.health().lagSeconds<.5){engine.archive();lastArchive=performance.now();}
+    if(mono-lastArchive>=1000&&engine.tick>=86400*M.MODEL.tickRate){engine.archive();lastArchive=performance.now();}
   }catch(error){parentPort.postMessage({type:'fatal',message:error.message});clearInterval(timer);}
 },25);
 parentPort.on('message',({id,method,args=[]})=>{
   try{
     let result;
-    if(method==='model')result={model:M.MODEL,sampling:engine.samplingPolicy,server:engine.health()};
-    else if(method==='close'){clearInterval(timer);engine.close();result={ok:true};}
+    if(method==='close'){clearInterval(timer);engine.close();result={ok:true};}
     else {
-      const allowed=['guest','authenticate','recover','rotateRecovery','logout','launch','get','list','active','trajectory','terminate','terminateMany','deleteSatellite','prepareExport','getExport','finishExport','health'];
+      const allowed=['modelInfo','registerWorld','guest','authenticate','recover','rotateRecovery','logout','launch','get','list','active','trajectory','terminate','terminateMany','deleteSatellite','prepareExport','getExport','finishExport','health'];
       if(!allowed.includes(method))throw new Error('未知内部指令');
       result=engine[method](...args);
     }

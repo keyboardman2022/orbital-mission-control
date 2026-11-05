@@ -124,7 +124,14 @@ test('loadExact stops before dispatch when aborted',async()=>{
 
 async function missionHarness(status='terminated',trajectoryCoverage=null,{webglAvailable=true,workerAvailable=false,stellarAvailable=false,performanceStep=0,initialServer={tick:1}}={}){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js'),visualModule=require('../orbital-visuals.js');
-  const nodes=new Map(),requests=[],frames=[],streams=[],workerMessages=[],liveRenders=[],liveTrails=[],starRenders=[],impactRenders=[],sweepRequests=[],deleteRequests=[],confirmations=[],drawImages=[],context2d=new Proxy({}, {get:(_,key)=>key==='createRadialGradient'?()=>({addColorStop(){}}):key==='drawImage'?(...args)=>drawImages.push(args):()=>{}});let performanceNow=0;
+  const nodes=new Map(),requests=[],frames=[],streams=[],workerMessages=[],liveRenders=[],liveTrails=[],starRenders=[],impactRenders=[],sweepRequests=[],deleteRequests=[],confirmations=[],drawImages=[],mapLabels=[],mapFills=[];
+  const context2d=new Proxy({
+    createRadialGradient:()=>({addColorStop(){}}),
+    drawImage:(...args)=>drawImages.push(args),
+    fillText:(name,x,y)=>mapLabels.push({name,x,y}),
+    fill(){mapFills.push(this.fillStyle);},
+    measureText:name=>({width:name.length*11})
+  },{get:(target,key)=>target[key]??(()=>{})});let performanceNow=0;
   const exact={pages:[],renders:[],clearCount:0,destroyCount:0,canvas:null},stellar={frames:[],canvas:null};
   const exactStore={pointCount:0,append(points){this.pointCount+=points.length;exact.pages.push(points);return {base:this.pointCount-points.length,length:points.length};},visibleRanges(){return this.pointCount>1?[{start:0,count:this.pointCount}]:[];},clear(){this.pointCount=0;}};
   const OrbitalHistoryGL={HARD_MAX_POINTS:409600,createStore:()=>exactStore,createRenderer:canvas=>{exact.canvas=canvas;return {available:webglAvailable,append(){},render(input){exact.renders.push(input);return true;},clear(){exact.clearCount++;},destroy(){exact.destroyCount++;}}}};
@@ -149,7 +156,7 @@ async function missionHarness(status='terminated',trajectoryCoverage=null,{webgl
   vm.runInNewContext(fs.readFileSync(require.resolve('../mission.js'),'utf8'),sandbox);
   const flush=()=>new Promise(resolve=>setImmediate(resolve));await flush();
   await node('satellites').children[0].onclick();
-  return {node,requests,flush,frames,streams,workerMessages,setPerformanceNow:value=>{performanceNow=value;},satellite,liveRenders,liveTrails,starRenders,impactRenders,sweepRequests,deleteRequests,confirmations,drawImages,exact,stellar};
+  return {node,requests,flush,frames,streams,workerMessages,setPerformanceNow:value=>{performanceNow=value;},satellite,liveRenders,liveTrails,starRenders,impactRenders,sweepRequests,deleteRequests,confirmations,drawImages,mapLabels,mapFills,exact,stellar};
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
@@ -231,7 +238,7 @@ test('mission draws all prescribed stars and centers a stellar capture effect on
  assert.ok(impact);
  assert.notEqual(impact.impactView.cx,500);
  assert.notEqual(impact.impactView.cy,392);
- assert.match(h.node('notice').textContent,/撞上恒星「烬星」/);
+ assert.match(h.node('notice').textContent,/撞上恒星 · 存活/);
  assert.equal(hole,undefined);
 });
 
@@ -251,6 +258,18 @@ test('mission composites the procedural field and keeps stellar close-ups center
   h.node('stellarFocus').value='colossus';h.node('stellarFocus').dispatch('change');
   h.node('resetView').onclick();assert.equal(h.node('stellarFocus').value,'');
   h.node('zoom').value=1000;h.node('zoom').dispatch('input');assert.equal(h.node('zoomValue').textContent,'6400%');
+});
+
+test('subpixel stars retain their individual colors on the full map without name labels',async()=>{
+  const h=await missionHarness('active',null,{stellarAvailable:true});
+  h.node('resetView').onclick();
+  h.node('zoom').value=0;h.node('zoom').dispatch('input');
+  h.node('blackHoleMarker').onclick();h.frames[0](0);
+  const bodies=h.stellar.frames.at(-1).bodies;
+  assert.ok(bodies.every(body=>body.radius<1));
+  for(const {star} of bodies)assert.ok(h.mapFills.includes(star.color),star.color);
+  assert.ok(h.mapLabels.every(label=>bodies.every(body=>body.star.name!==label.name)));
+  assert.ok(h.node('stellarFocus').children.every(option=>/^恒星 \d+$/.test(option.textContent)));
 });
 
 test('stellar close-up and its surface share one world phase even when drawing takes time',async()=>{

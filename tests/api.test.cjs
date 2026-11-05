@@ -16,6 +16,10 @@ test('HTTP launch, ownership, CSRF, persistence, pagination, recovery and export
  const missionPage=await request('/mission.html');assert.ok(missionPage.data.indexOf('history-webgl.js')<missionPage.data.indexOf('mission.js'));
  assert.ok(missionPage.data.indexOf('stellar-renderer.js')<missionPage.data.indexOf('mission.js'));
  const stellarAsset=await request('/stellar-renderer.js');assert.equal(stellarAsset.res.status,200);assert.match(stellarAsset.res.headers.get('content-type'),/text\/javascript/);
+ assert.match(missionPage.data,/href="seed-preview\.html"/);
+ const seedPreview=await request('/seed-preview.html');assert.equal(seedPreview.res.status,200);assert.match(seedPreview.data,/shared\/world-generator\.js/);
+ for(const asset of ['/seed-preview.css','/seed-preview.js','/shared/world-generator.js'])assert.equal((await request(asset)).res.status,200);
+ assert.equal((await request('/seed-preview.html',{method:'POST'})).res.status,405);
  const ga=await request('/api/session/guest',{method:'POST',body:{}}),a={cookie:ga.res.headers.get('set-cookie').split(';')[0],csrfToken:ga.data.csrfToken};
  assert.equal(ga.res.status,200);assert.ok(ga.data.recoveryKey);
  const gb=await request('/api/session/guest',{method:'POST',body:{}}),b={cookie:gb.res.headers.get('set-cookie').split(';')[0],csrfToken:gb.data.csrfToken};

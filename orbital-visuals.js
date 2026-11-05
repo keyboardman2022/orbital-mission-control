@@ -99,9 +99,14 @@ const plasma = Array.from({length:180}, () => ({angle:random()*Math.PI*2,radius:
 const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:random(),size:.4+random()*.9}));
 
     makeRing(135);
-    function blackhole(ctx,w,h,view,t){
+    function blackhole(ctx,w,h,view,t,color){
       const {size,cx,cy,scale}=view;
-  const hue=135;
+  let hue=135;
+  if(color){
+    const rgb=Number.parseInt(color.slice(1),16),r=rgb>>16,g=(rgb>>8)&255,b=rgb&255;
+    const max=Math.max(r,g,b),chroma=max-Math.min(r,g,b);
+    if(chroma)hue=60*(max===r?(g-b)/chroma:max===g?2+(b-r)/chroma:4+(r-g)/chroma);
+  }
   const halo=ctx.createRadialGradient(cx,cy,size*.09,cx,cy,size*.47);
   halo.addColorStop(0,`hsla(${hue},45%,45%,.03)`);
   halo.addColorStop(.28,`hsla(${hue},45%,48%,.17)`);

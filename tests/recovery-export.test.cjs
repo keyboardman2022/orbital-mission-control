@@ -9,11 +9,45 @@ const {createBackup}=require('../server/backup.js');
 const M=require('../shared/simulation.js');
 const input={name:'-1+1',position:{x:330,y:0},massKg:1000,speed:M.circularSpeed(330),directionDeg:90,dynamicsVersion:M.MODEL.dynamics.version,idempotencyKey:'consistent-launch'};
 function setup(t){const dir=mkdtempSync(join(tmpdir(),'orbital-recovery-')),engines=[];let now=100000;const filename=join(dir,'orbital.sqlite');const make=(path=filename)=>{const e=new Engine({filename:path,now:()=>now});engines.push(e);return e;};t.after(()=>{engines.forEach(e=>e.close());rmSync(dir,{recursive:true,force:true});});return {dir,filename,make,setTime:n=>now=n};}
-test('crash rolls back only uncommitted progress then deterministically catches up',t=>{
+test('restart preserves committed state without simulating downtime and then resumes live time',t=>{
  const f=setup(t);let e=f.make();const u=e.guest().user.id,p=e.launch(u,input);e.advanceTo(240);e.checkpoint();e.advanceTo(480);
- e.db.close();e.closed=true;f.setTime(104000);e=f.make();assert.equal(e.get(u,p.id).state.tick,240);e.advanceTo(e.targetTick());e.checkpoint();
- const expected=M.createState(M.validateLaunch(input),{continuousTracking:true});for(let i=0;i<960;i++)M.step(expected);
+ e.db.close();e.closed=true;f.setTime(100000+30*86400000);e=f.make();assert.equal(e.get(u,p.id).state.tick,240);
+ assert.equal(e.health().status,'running');assert.equal(e.health().lagSeconds,0);assert.equal(e.tick,240);
+ for(let i=0;i<10;i++)e.advanceRealtime(.1);e.checkpoint();
+ const expected=M.createState(M.validateLaunch(input),{continuousTracking:true});for(let i=0;i<480;i++)M.step(expected);
  assert.deepEqual(e.get(u,p.id).state,expected);const points=e.trajectory(u,p.id,{limit:5000}).points;assert.equal(new Set(points.map(p=>p.seq)).size,points.length);
+});
+
+test('runtime clock ignores long suspension, retains fractional ticks and never carries unprocessed backlog',t=>{
+ const f=setup(t),e=f.make(),u=e.guest().user.id;e.launch(u,input);
+ for(let i=0;i<4;i++)e.advanceRealtime(1/960);assert.equal(e.tick,1);
+ e.advanceRealtime(30*86400);assert.equal(e.tick,25,'a long suspension advances at most 0.1 simulated seconds');
+ e.advanceRealtime(.025,{budgetMs:0});assert.equal(e.tick,25);
+ e.advanceRealtime(.025);assert.equal(e.tick,31,'discarded work must not be replayed on the next interval');
+ for(const seconds of[NaN,Infinity,-1])e.advanceRealtime(seconds);assert.equal(e.tick,31);
+});
+
+test('new launches run immediately even when wall time is far ahead of the saved simulation',t=>{
+ const f=setup(t),e=f.make(),u=e.guest().user.id;
+ f.setTime(100000+30*86400000);const p=e.launch(u,input);
+ assert.equal(p.status,'active');assert.equal(p.state.status,'active');assert.equal(p.birthTick,0);
+ assert.equal(e.trajectory(u,p.id,{}).points[0].kind,'birth');assert.equal(e.health().lagSeconds,0);
+});
+
+test('legacy queued satellites start at the restored tick exactly once without rewriting older trajectories',t=>{
+ const f=setup(t);let e=f.make();const u=e.guest().user.id,old=e.launch(u,input);e.advanceTo(240);e.checkpoint();
+ const oldState=e.get(u,old.id).state,oldPoints=e.trajectory(u,old.id,{}).points;
+ const pending=e.launch(u,{...input,idempotencyKey:'legacy-queued-launch'});e.close();
+ const {DatabaseSync}=require('node:sqlite'),db=new DatabaseSync(f.filename);
+ const raw=JSON.parse(db.prepare('SELECT record FROM satellites WHERE id=?').get(pending.id).record);
+ raw.status='queued';raw.state.status='queued';raw.birthTick=null;raw.seq=0;raw.eventSeq=0;raw.lastSample=null;delete raw.trajectoryBudget;
+ db.exec('BEGIN');db.prepare('DELETE FROM points WHERE satellite_id=?').run(pending.id);db.prepare('DELETE FROM events WHERE satellite_id=?').run(pending.id);db.prepare('UPDATE satellites SET record=? WHERE id=?').run(JSON.stringify(raw),pending.id);db.exec('COMMIT');db.close();
+ f.setTime(100000+30*86400000);e=f.make();
+ const born=e.get(u,pending.id);assert.equal(born.status,'active');assert.equal(born.birthTick,240);assert.equal(born.state.fieldTick,240);
+ assert.deepEqual(e.get(u,old.id).state,oldState);assert.deepEqual(e.trajectory(u,old.id,{}).points,oldPoints);
+ assert.equal(e.trajectory(u,pending.id,{}).points.length,1);assert.equal(e.trajectory(u,pending.id,{}).points[0].kind,'birth');
+ e.close();e=f.make();assert.equal(e.trajectory(u,pending.id,{}).points.length,1);
+ assert.equal(e.db.prepare('SELECT COUNT(*) AS n FROM events WHERE satellite_id=?').get(pending.id).n,1);
 });
 test('rollback detection survives repeated erroneous restarts',t=>{
  const f=setup(t);let e=f.make();e.close();f.setTime(97000);e=f.make();assert.equal(e.health().status,'clock_error');e.close();

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>种子地图预览 · ORBITAL</title>
+  <link rel="stylesheet" href="seed-preview.css">
+  <script src="shared/world-generator.js" defer></script>
+  <script src="seed-preview.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a class="wordmark" href="mission.html">ORBITAL <span>MAP LAB</span></a>
+    <a class="back-link" href="mission.html">返回任务控制</a>
+  </header>
+  <main>
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow">ORBITAL ATLAS / SEED MAP</p>
+      <h1 id="page-title">种子地图预览</h1>
+      <p>选好种子和数量后，可以预览星系布局，或直接进入地图发射卫星。全部选项设为随机时，种子会决定生成 2–4 个星系。</p>
+    </section>
+
+    <form id="seed-form" class="seed-form">
+      <div class="seed-controls">
+        <div class="seed-field">
+          <label for="seed">地图种子</label>
+          <div class="seed-input">
+            <input id="seed" value="ORBITAL-06" maxlength="64" required autocomplete="off" spellcheck="false" aria-describedby="generation-error">
+            <button type="button" id="random-seed">随机种子</button>
+          </div>
+        </div>
+        <div class="seed-actions">
+          <button type="submit">预览地图</button>
+          <button class="generate-button" id="play-map" type="button">进入地图 <span aria-hidden="true">↗</span></button>
+        </div>
+      </div>
+      <fieldset class="count-options" aria-describedby="count-help generation-error">
+        <legend>自定义数量</legend>
+        <div class="count-fields">
+          <label>星系数 <select name="systems"><option value="">随机</option></select></label>
+          <label>黑洞数 <select name="blackHoles"><option value="">随机</option><option value="required">至少 1 个</option></select></label>
+          <label>恒星数 <select name="stars"><option value="">随机</option></select></label>
+          <label>行星数 <select name="planets"><option value="">随机</option></select></label>
+        </div>
+        <p id="count-help">每个双星系统有 2 颗恒星。每个黑洞伴星系统有 1 个黑洞和 3–5 颗恒星。每个系统有 1–2 颗行星。</p>
+      </fieldset>
+      <p class="input-error" id="generation-error" role="alert" hidden></p>
+    </form>
+    <p id="generation-status" class="generation-status" role="status"></p>
+    <noscript><p>请启用 JavaScript 以生成种子地图。</p></noscript>
+
+    <div id="map-result"></div>
+    <footer><span>ORBITAL / 种子地图实验室</span><span id="generator-version"></span></footer>
+  </main>
+
+  <template id="map-template">
+    <article class="map-card">
+      <div class="card-header">
+        <div><p class="eyebrow">SEED MAP</p><h2 class="seed-name"></h2></div>
+        <button class="view-toggle" type="button" aria-pressed="false">系统近景</button>
+      </div>
+      <dl class="map-stats"></dl>
+      <div class="map-content">
+        <div class="map-display">
+          <svg class="map-drawing" viewBox="0 0 500 260" role="img" aria-label="种子地图"></svg>
+          <div class="map-key"><span><i class="key-hole"></i>黑洞伴星</span><span><i class="key-binary"></i>双星</span></div>
+        </div>
+        <div class="map-inspector">
+          <div class="system-section">
+            <p class="eyebrow">SYSTEM INDEX / 星系列表</p>
+            <div class="system-list" role="group" aria-label="星系列表"></div>
+          </div>
+          <section class="system-detail">
+            <div class="detail-heading"><h3></h3><span class="type-tag"></span></div>
+            <p class="system-parameters"></p>
+            <table>
+              <caption>成员位置与配色</caption>
+              <thead><tr><th scope="col">名称与颜色</th><th scope="col">质量比</th><th scope="col">绕行半径</th><th scope="col">初始相位</th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <p class="detail-note">质量比以本系统主星或主黑洞为基准，距离使用场景单位。</p>
+          </section>
+        </div>
+      </div>
+    </article>
+  </template>
+</body>
+</html>

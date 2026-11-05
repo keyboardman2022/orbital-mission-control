@@ -8,6 +8,7 @@ const {createStreamState,buildSnapshot}=require('./stream-snapshot.js');
 const ROOT=resolve(__dirname,'..');
 const HELD_LOCKS=new Set();
 const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','history-webgl.js','preview-worker.js','orbital-visuals.js','stellar-renderer.js','shared/simulation.js','shared/units.js','shared/history-window.js','shared/map-sweep.js']);
+for(const file of ['seed-preview.html','seed-preview.css','seed-preview.js','shared/world-generator.js'])FILES.add(file);
 const TYPES={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',json:'application/json; charset=utf-8',csv:'text/csv; charset=utf-8'};
 const error=(status,message)=>Object.assign(new Error(message),{status});
 function acquireLock(dataDir){
@@ -58,7 +59,7 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
   function checkCsrf(req,auth){const actual=Buffer.from(String(req.headers['x-csrf-token']||'')),wanted=Buffer.from(auth.csrfToken);if(actual.length!==wanted.length||!timingSafeEqual(actual,wanted))throw error(403,'会话校验失败，请重新连接');}
   const rates=new Map();
   function rate(req,key,max){const id=(req.socket.remoteAddress||'local')+':'+key,now=Date.now(),old=rates.get(id);const r=old&&now-old.start<60000?old:{start:now,n:0};r.n++;rates.set(id,r);if(r.n>max)throw error(429,'操作过于频繁，请一分钟后重试');}
-  function publicExport(record){const {satellite,model,...out}=record;return {...out,downloadUrl:record.status==='ready'?`/api/exports/${record.id}/download`:null};}
+  function publicExport(record){const {satellite,model,world,...out}=record;return {...out,downloadUrl:record.status==='ready'?`/api/exports/${record.id}/download`:null};}
   function removeExportFiles(ids){for(const id of ids)for(const suffix of ['.json','.csv','.json.partial','.csv.partial'])try{unlinkSync(join(exportsDir,id+suffix));}catch(error){if(error.code!=='ENOENT')console.error('清理导出文件失败：',error.message);}}
   async function cancelSatelliteExports(satelliteId){
     for(let i=exportQueue.length-1;i>=0;i--)if(exportQueue[i].satelliteId===satelliteId)exportQueue.splice(i,1);
@@ -90,7 +91,11 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       if(path==='/api/session/guest'&&req.method==='POST'){
         rate(req,'guest',30);await body(req);const result=await rpc('guest',tokenOf(req));cookie(res,result.token);const {token,...safe}=result;return json(res,200,safe);
       }
-      if(path==='/api/model'&&req.method==='GET')return json(res,200,await rpc('model'));
+      const worldId=url.searchParams.get('worldId');
+      if(path==='/api/worlds'&&req.method==='POST'){
+        rate(req,'worlds',30);return json(res,201,await rpc('registerWorld',await body(req)));
+      }
+      if(path==='/api/model'&&req.method==='GET')return json(res,200,await rpc('modelInfo',worldId));
       const token=tokenOf(req),auth=await rpc('authenticate',token);if(mutating)checkCsrf(req,auth);
       if(path==='/api/session/recover'&&req.method==='POST'){
         rate(req,'recovery',10);const input=await body(req),result=await rpc('recover',input.recoveryKey);await rpc('logout',token);cookie(res,result.token);const {token:secret,...safe}=result;return json(res,200,safe);
@@ -99,17 +104,22 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       if(path==='/api/session'&&req.method==='DELETE'){await rpc('logout',token);cookie(res,'',true);for(const s of streams)if(s.token===token)s.res.end();return json(res,200,{ok:true});}
       if(path==='/api/stream'&&req.method==='GET'){
         if([...streams].filter(s=>s.userId===auth.userId).length>=5)throw error(429,'实时连接过多，请关闭多余页面');
-        const selectedId=url.searchParams.get('satelliteId');if(selectedId)await rpc('get',auth.userId,selectedId);
+        const selectedId=url.searchParams.get('satelliteId');
+        if(worldId)await rpc('modelInfo',worldId);
+        if(selectedId){
+          const selected=await rpc('get',auth.userId,selectedId);
+          if((selected.worldId??null)!==worldId)throw error(404,'当前地图中找不到该卫星');
+        }
         res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});res.write('retry: 2000\n\n');
-        const stream={res,token,userId:auth.userId,selectedId,snapshot:createStreamState()};streams.add(stream);res.on('close',()=>streams.delete(stream));return;
+        const stream={res,token,userId:auth.userId,worldId,selectedId,snapshot:createStreamState()};streams.add(stream);res.on('close',()=>streams.delete(stream));return;
       }
       if(path==='/api/satellites'&&req.method==='GET')return json(res,200,await rpc('list',auth.userId,Object.fromEntries(url.searchParams)));
       if(path==='/api/satellites'&&req.method==='POST'){
         rate(req,'launch',120);return json(res,201,{satellite:await rpc('launch',auth.userId,await body(req))});
       }
-      if(path==='/api/satellites/active'&&req.method==='GET')return json(res,200,await rpc('active',auth.userId));
+      if(path==='/api/satellites/active'&&req.method==='GET')return json(res,200,await rpc('active',auth.userId,worldId));
       if(path==='/api/satellites/terminate-many'&&req.method==='POST'){
-        rate(req,'sweep',120);const input=await body(req);return json(res,200,await rpc('terminateMany',auth.userId,input.ids));
+        rate(req,'sweep',120);const input=await body(req);return json(res,200,await rpc('terminateMany',auth.userId,input.ids,input.worldId));
       }
       const sat=path.match(/^\/api\/satellites\/([a-f0-9-]{36})(?:\/(trajectory|terminate|exports))?$/);
       if(sat){
@@ -146,7 +156,15 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
     if(broadcasting||closing||!streams.size)return;broadcasting=true;
     try{
       const cache=new Map();for(const s of streams){
-        try{await rpc('authenticate',s.token);if(!cache.has(s.userId))cache.set(s.userId,await rpc('list',s.userId,{limit:100}));let data=cache.get(s.userId);if(s.selectedId&&!data.satellites.some(p=>p.id===s.selectedId))data={...data,satellites:[...data.satellites,await rpc('get',s.userId,s.selectedId)]};if(s.res.writableLength>1024*1024){s.res.destroy();continue;}s.res.write('event: snapshot\ndata: '+JSON.stringify(buildSnapshot(s.snapshot,data,{selectedId:s.selectedId}))+'\n\n');}catch{s.res.end();}
+        try{
+          await rpc('authenticate',s.token);
+          const key=s.userId+':'+(s.worldId??'');
+          if(!cache.has(key))cache.set(key,await rpc('list',s.userId,{limit:100,worldId:s.worldId}));
+          let data=cache.get(key);
+          if(s.selectedId&&!data.satellites.some(p=>p.id===s.selectedId))data={...data,satellites:[...data.satellites,await rpc('get',s.userId,s.selectedId)]};
+          if(s.res.writableLength>1024*1024){s.res.destroy();continue;}
+          s.res.write('event: snapshot\ndata: '+JSON.stringify(buildSnapshot(s.snapshot,data,{selectedId:s.selectedId}))+'\n\n');
+        }catch{s.res.end();}
       }
     }finally{broadcasting=false;}
   },200);
