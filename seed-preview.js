@@ -4,6 +4,7 @@
   const {VERSION, LIMITS, generateWorld, bodyPositions} = OrbitalWorldGenerator;
   const types = {'black-hole-companions': '黑洞伴星', binary: '双星'};
   const kinds = {blackHole: '黑洞', star: '恒星', planet: '行星'};
+  const planetMarkerRadius = 1;
   const formatter = new Intl.NumberFormat('zh-CN', {maximumFractionDigits: 1});
   const degree = radians => `${((Math.round(radians * 1800 / Math.PI) % 3600) / 10).toFixed(1)}°`;
   const ratio = value => value < .001 ? value.toExponential(2) : value.toFixed(3);
@@ -79,7 +80,7 @@
     for (const body of positions) {
       if (localPlanets.includes(body)) continue;
       const point = project(body);
-      const radius = body.kind === 'planet' ? 2.4 : 4;
+      const radius = body.kind === 'planet' ? planetMarkerRadius : 4;
       svg(drawing, 'circle', {cx: point.x, cy: point.y, r: radius, fill: body.kind === 'blackHole' ? '#080d18' : body.color, stroke: body.color});
     }
     if (localPlanets.length) {
@@ -89,8 +90,8 @@
         const cx = 62, cy = 86 + index * 88, radius = 22;
         svg(drawing, 'circle', {cx, cy, r: radius, fill: 'none', stroke: planet.color, 'stroke-opacity': .6});
         svg(drawing, 'circle', {cx, cy, r: 4, fill: host.color});
-        svg(drawing, 'circle', {cx: cx + radius * Math.cos(planet.orbit.phase), cy: cy - radius * Math.sin(planet.orbit.phase), r: 3, fill: planet.color});
-        svg(drawing, 'text', {x: cx, y: cy + 36, fill: host.color, 'font-size': 11, 'text-anchor': 'middle'}, planet.name);
+        svg(drawing, 'circle', {cx: cx + radius * Math.cos(planet.orbit.phase), cy: cy - radius * Math.sin(planet.orbit.phase), r: planetMarkerRadius, fill: planet.color});
+        svg(drawing, 'text', {x: cx, y: cy + 36, fill: planet.color, 'font-size': 11, 'text-anchor': 'middle'}, `行星 ${index + 1}`);
       }
     }
   }
@@ -153,8 +154,10 @@
       const table = get('tbody');
       table.replaceChildren();
       const primary = selected.bodies[0];
-      let starNumber = 0;
-      const names = new Map(selected.bodies.map(body => [body.id, body.kind === 'star' ? `恒星 ${++starNumber}` : body.name]));
+      const bodyNumbers = {star: 0, planet: 0};
+      const names = new Map(selected.bodies.map(body => [
+        body.id, body.kind === 'blackHole' ? body.name : `${kinds[body.kind]} ${++bodyNumbers[body.kind]}`
+      ]));
       for (const body of selected.bodies) {
         const row = table.insertRow();
         const first = row.insertCell();

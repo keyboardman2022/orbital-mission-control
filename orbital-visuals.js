@@ -8,14 +8,18 @@ const OrbitalVisuals=(()=>{
     return {radius,opacity:.85*Math.min(1,(radius/2)**2)};
   }
   function stellarAppearance(scale,star){
-    const collisionRadius=Math.max(0,star?.collisionRadius||0);
+    const collisionRadius=Math.max(0,star?.collisionRadius??star?.radius??0);
     const visualScale=Number.isFinite(scale)&&scale>0?scale:0;
     const physicalRadius=collisionRadius*visualScale;
-    // Match the approved 96-unit shadow / 6..20-unit star preview using the
-    // unchanged 66 * 1.65 black-hole shadow. Collision geometry stays physical.
-    const worldRadius=collisionRadius>0?(6+14*Math.min(1,collisionRadius/86)**.7)*(108.9/96):0;
+    // Enlarge the rendered disc by 15% while retaining the physical collision radius.
+    const worldRadius=collisionRadius>0?(6+14*Math.min(1,collisionRadius/86)**.7)*(108.9/96)*1.15:0;
     const radius=worldRadius*visualScale;
     return {physicalRadius,radius,markerRadius:radius,opacity:Math.min(1,(radius/.7)**2)};
+  }
+  function planetDisplayRadius(physicalRadius,smallestStarRadius){
+    // Seeded planets range from 5 to 13 scene units in physical radius.
+    const fraction=Math.max(0,Math.min(1,(physicalRadius-5)/8));
+    return smallestStarRadius*(.16+.09*fraction);
   }
   function blackHoleAppearance(view){
     return {...view,size:view.size*BLACK_HOLE_VISUAL_SCALE,scale:view.scale*BLACK_HOLE_VISUAL_SCALE};
@@ -194,6 +198,6 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
     for(const f of wave.flares||[]){const age=wave.age-f.born,alpha=Math.max(0,1-age/.5);ctx.fillStyle=`rgba(255,219,157,${alpha})`;for(let i=0;i<8;i++){const angle=i*Math.PI/4;ctx.beginPath();ctx.arc(f.x+Math.cos(angle)*age*65,f.y+Math.sin(angle)*age*65,Math.max(.5,2*alpha),0,Math.PI*2);ctx.fill();}}
     ctx.restore();
   }
-  return {create,satelliteAppearance,stellarAppearance,blackHoleAppearance,renderStar,renderSatellite,renderTrail,renderMapImpact};
+  return {create,satelliteAppearance,stellarAppearance,planetDisplayRadius,blackHoleAppearance,renderStar,renderSatellite,renderTrail,renderMapImpact};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalVisuals;

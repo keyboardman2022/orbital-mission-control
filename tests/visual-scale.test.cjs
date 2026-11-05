@@ -58,13 +58,20 @@ test('stellar close-up grows linearly instead of clamping the surface to a tiny 
  assert.ok(Math.abs(extreme.markerRadius/near.markerRadius-100)<1e-10);
  assert.ok(extreme.markerRadius>1000);
 });
-test('all approved stellar sizes retain their preview ratio to the unchanged black-hole shadow',()=>{
+test('stellar discs are 15 percent larger and stay smaller than the black-hole shadow',()=>{
  const stars=require('../shared/simulation.js').MODEL.stars;
  for(const star of stars)for(const scale of[1e-6,.01,1,64]){
    const appearance=V.stellarAppearance(scale,star),hole=66*1.65*scale;
-   assert.ok(hole/appearance.radius>=4.8-1e-10&&hole/appearance.radius<=10.6);
+   assert.ok(hole/appearance.radius>=4.8/1.15-1e-10&&hole/appearance.radius<=10.6/1.15);
  }
- assert.ok(Math.abs(V.stellarAppearance(1,stars.at(-1)).radius-22.6875)<1e-10);
+ assert.ok(Math.abs(V.stellarAppearance(1,stars.at(-1)).radius-26.090625)<1e-10);
+});
+
+test('even the smallest local star has at least four times the diameter of its planets',()=>{
+ const starRadius=V.stellarAppearance(1,{collisionRadius:20}).radius;
+ const small=V.planetDisplayRadius(5,starRadius),large=V.planetDisplayRadius(13,starRadius);
+ assert.ok(Math.abs(small/starRadius-.16)<1e-10);
+ assert.ok(Math.abs(large/starRadius-.25)<1e-10);
 });
 
 test('black-hole appearance enlarges only the rendered view',()=>{

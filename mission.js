@@ -19,7 +19,7 @@
   const statusText = {queued:'排队中',active:'运行中',captured:'已撞击天体',escaped:'已逃逸',terminated:'已终止',out_of_observable:'超出可观测区域',error:'计算中断'};
   const dynamicsLabel=version=>version===model.MODEL.dynamics.version?(world?'种子地图引力场':'黑洞 + 九恒星引力场'):version===model.MODEL.dynamics.legacyVersion?'历史独立双体模型':'历史测试粒子模型';
   const trajectoryNotice=s=>s?.trajectoryCoverage?.status==='capped'?`轨迹记录已达约 100 MiB 上限 · 记录至 ${Number(s.trajectoryCoverage.endElapsedSeconds).toFixed(3)} 模拟秒`:'';
-  const isStar=body=>!body.kind||body.kind==='star';
+  const anonymousBodyLabels={star:'恒星',planet:'行星'};
   const canvas=$('universe'),ctx=canvas.getContext('2d'),visuals=OrbitalVisuals.create();
   const stellarCanvas=document.createElement('canvas'),stellarRenderer=OrbitalStellar.createRenderer(stellarCanvas);
   globalThis.addEventListener?.('pagehide',event=>{if(!event.persisted)stellarRenderer.destroy();});
@@ -69,7 +69,7 @@
     let nearest=null;
     for(const body of model.stellarBodiesAtTick(authoritativeFieldTick())){
       const radius=Math.hypot(x-body.x,y-body.y);
-      if(!nearest||radius<nearest.radius)nearest={...body,name:isStar(body)?'附近恒星':body.name,radius,mu:body.mu+(body.rs?model.effectiveMu(massKg):0)};
+      if(!nearest||radius<nearest.radius)nearest={...body,name:anonymousBodyLabels[body.kind]??body.name,radius,mu:body.mu+(body.rs?model.effectiveMu(massKg):0)};
     }
     return nearest;
   }
@@ -194,12 +194,21 @@
   $('trackSelected').onclick=()=>setTracking(!tracking);
   $('follow').addEventListener('change',()=>{if($('follow').checked){setTracking(false);clearStellarFocus();}});
   function clearStellarFocus(){focusedStarId=null;$('stellarFocus').value='';}
+  const planetRadii=new Map();
+  for(const system of world?.systems??[]){
+    const stars=system.bodies.filter(body=>body.kind==='star');
+    const smallestStarRadius=Math.min(...stars.map(body=>OrbitalVisuals.stellarAppearance(1,body).radius));
+    for(const body of system.bodies){
+      if(body.kind==='planet')planetRadii.set(body.id,OrbitalVisuals.planetDisplayRadius(body.radius,smallestStarRadius));
+    }
+  }
   const focusBodies=world?model.stellarBodiesAtTick(0):model.MODEL.stars;
-  let starNumber=0;
-  for(const star of focusBodies){
+  const bodyNumbers={star:0,planet:0};
+  for(const body of focusBodies){
     const option=document.createElement('option');
-    option.value=star.id;
-    option.textContent=isStar(star)?`恒星 ${++starNumber}`:star.name;
+    const kind=body.kind??'star',label=anonymousBodyLabels[kind];
+    option.value=body.id;
+    option.textContent=label?`${label} ${++bodyNumbers[kind]}`:body.name;
     $('stellarFocus').append(option);
   }
   $('stellarFocus').addEventListener('change',()=>{
@@ -208,7 +217,7 @@
     setTracking(false);
     $('follow').checked=false;
     focusedStarId=star.id;
-    const base=OrbitalCamera.view(width,height,1),radius=star.rs?star.rs*1.65:star.kind==='planet'?star.radius:OrbitalVisuals.stellarAppearance(1,star).radius;
+    const base=OrbitalCamera.view(width,height,1),radius=star.rs?star.rs*1.65:planetRadii.get(star.id)??OrbitalVisuals.stellarAppearance(1,star).radius;
     if(radius>0&&base.scale>0)setZoom(Math.min(140,width*.14,height*.18)/(radius*base.scale));
   });
   function observedPosition(id){
@@ -242,7 +251,7 @@
     }else for(const star of model.MODEL.stars)ring(star.orbitRadius,star.color+'1c',.75);
     const bodies=fieldBodies.map(star=>{
       const q=project(star.x,star.y);
-      if(star.rs||star.kind==='planet')return {...q,radius:(star.rs?star.rs*1.65:star.radius)*view.scale,star};
+      if(star.rs||star.kind==='planet')return {...q,radius:(star.rs?star.rs*1.65:planetRadii.get(star.id))*view.scale,star};
       const appearance=OrbitalVisuals.stellarAppearance(view.scale,star);
       return {...q,radius:appearance.radius,appearance,star};
     });
@@ -286,7 +295,7 @@
     ctx.textBaseline='middle';
     ctx.textAlign='left';
     for(const {x,y,radius,star,angle} of visible){
-      if(isStar(star))continue;
+      if(star.kind!=='blackHole')continue;
       const small=radius<3||angle!==undefined;
       const labelWidth=ctx.measureText(star.name).width;
       const gap=Math.max(4,radius)+7;
@@ -323,14 +332,15 @@
       }
     }
     for(const {x,y,radius,star,angle} of visible){
-      if(isStar(star)&&angle===undefined){
-        // Let the tinted point fade as the resolved stellar surface takes over.
-        const opacity=1-Math.min(1,(radius/2)**2);
+      if(star.kind!=='blackHole'&&angle===undefined){
+        // Let the tinted point fade as the visible disc takes over.
+        const markerRadius=star.kind==='planet'?1.1:2;
+        const opacity=1-Math.min(1,(radius/markerRadius)**2);
         if(opacity>0){
           ctx.globalAlpha=opacity;
           ctx.fillStyle=star.color;
           ctx.beginPath();
-          ctx.arc(x,y,2,0,Math.PI*2);
+          ctx.arc(x,y,markerRadius,0,Math.PI*2);
           ctx.fill();
           ctx.globalAlpha=1;
         }
@@ -447,7 +457,7 @@
     const event=s.state.event;
     impactWaves.push(impactAt(s));
     if(impactWaves.length>12)impactWaves.shift();
-    const result=event?.bodyType==='black-hole'?'已被黑洞吞噬':event?.bodyType==='star'?'撞上恒星':`撞上「${event?.bodyName??'天体'}」`;
+    const result=event?.bodyType==='black-hole'?'已被黑洞吞噬':`撞上${anonymousBodyLabels[event?.bodyType]??'天体'}`;
     message(`「${s.name}」${result} · 存活 ${s.state.elapsedSeconds.toFixed(3)} 模拟秒`);
   }
   function replayPoint(time){return history.interpolate(historyPoints,time);}
@@ -595,7 +605,7 @@
   }
   function renderDetail(){const s=satellites.get(selectedId);$('fitSelected').disabled=!s;$('trackSelected').disabled=!s;if(!s)return;$('detail').hidden=false;$('detailName').textContent=s.name;
     const state=observedPosition(selectedId)||s.state,t=units.telemetry(state,s.calibration||scale),shown=displayStates.get(selectedId)||s;
-    const event=state?.event,bodyName=event?.bodyType==='star'?'恒星':event?.bodyName;
+    const event=state?.event,bodyName=anonymousBodyLabels[event?.bodyType]??event?.bodyName;
     $('detailMeta').textContent=`${s.id} · ${statusText[shown.status]||shown.status} · ${(state?.elapsedSeconds||0).toFixed(3)} 模拟秒 · 对应 ${t.physicalElapsedSeconds.toPrecision(4)} s 模型物理时间 · ${s.massKg} kg · ${dynamicsLabel(s.initial.dynamicsVersion)}${bodyName?` · 撞击 ${bodyName}`:''}${trajectoryNotice(s)?' · '+trajectoryNotice(s):''}${recovering?' · 补算期间的物理预演，正式记录以后台为准':''}`;
     $('detailSpeed').textContent=`初速度 ${units.toKmS(s.initial.speed,s.calibration||scale).toLocaleString('zh-CN',{maximumFractionDigits:2})} km/s · ${shown.status==='active'?'当前':'末态'}速度 ${units.formatSpeed(state,s.calibration||scale)}${t.physicalSpeedValid?` · vx ≈ ${t.vxKmS.toFixed(2)}，vy ≈ ${t.vyKmS.toFixed(2)} km/s · ${(t.fractionOfC*100).toFixed(2)}% c`:` · 模型给出 ${t.speedKmS.toFixed(2)} km/s，不能作为真实速度`}${s.calibrationInferred?' · 历史场景记录按示例质量换算':''}`;
     const deleting=deletingId===s.id;$('terminate').disabled=!['active','queued'].includes(s.status)||!online||deleting;$('deleteRecord').disabled=!online||sweepBusy||deleting;}
