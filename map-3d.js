@@ -545,17 +545,23 @@
     const {toScreen,atFocalDepth}=projection();
     const screenCenter={x:width/2,y:height/2};
     let underPointer,nearCenter;
-    let pointerDistance=Infinity,centerDistance=Math.min(width,height)*.24;
+    let pointerDistance=Infinity,centerDistance=Infinity;
+    const centerSearchRadius=Math.min(width,height)*.24;
     for(const body of bodiesAt(fieldTick())){
       if(config.world&&selected&&!systemBodies.get(selected.id).has(body.id))continue;
       const point=toScreen(body);
-      if(!point||point.x<0||point.x>width||point.y<0||point.y>height)continue;
-      const visualRadius=body.rs?body.rs*1.65*point.scale:planetRadii.has(body.id)
+      if(!point)continue;
+      // The disk extends past the shadow and can still fill the view with its center offscreen.
+      const visualRadius=body.rs?body.rs*1.65*point.scale*3:planetRadii.has(body.id)
         ? planetRadii.get(body.id)*point.scale:OrbitalVisuals.stellarAppearance(point.scale,body,starDisplayScale).radius;
+      const reach=body.rs?visualRadius:0;
+      if(point.x+reach<0||point.x-reach>width||point.y+reach<0||point.y-reach>height)continue;
       const gap=Math.hypot(point.x-pointer.x,point.y-pointer.y);
       if(gap<Math.max(12,visualRadius)&&gap<pointerDistance){underPointer=body;pointerDistance=gap;}
       const fromCenter=Math.hypot(point.x-screenCenter.x,point.y-screenCenter.y);
-      if(fromCenter<centerDistance){nearCenter=body;centerDistance=fromCenter;}
+      if(fromCenter<Math.max(centerSearchRadius,visualRadius)&&fromCenter<centerDistance){
+        nearCenter=body;centerDistance=fromCenter;
+      }
     }
     return underPointer??nearCenter??atFocalDepth(screenCenter.x,screenCenter.y);
   }
