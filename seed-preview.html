@@ -40,9 +40,14 @@
           <label>星系数 <select name="systems"><option value="">随机</option></select></label>
           <label>黑洞数 <select name="blackHoles"><option value="">随机</option><option value="required">至少 1 个</option></select></label>
           <label>恒星数 <select name="stars"><option value="">随机</option></select></label>
-          <label>行星数 <select name="planets"><option value="">随机</option></select></label>
+          <label id="planet-count">行星数 <select name="planets"><option value="">随机</option></select></label>
         </div>
         <p id="count-help">每个双星系统有 2 颗恒星。每个黑洞伴星系统有 1 个黑洞和 3–5 颗恒星。每个系统有 1–2 颗行星。</p>
+        <details id="body-profile-help" hidden>
+          <summary>查看天体半径和质量范围</summary>
+          <p>半径使用场景单位，质量以太阳质量为单位。这些范围用于游戏模拟。</p>
+          <ul></ul>
+        </details>
       </fieldset>
       <p class="input-error" id="generation-error" role="alert" hidden></p>
     </form>
@@ -63,6 +68,11 @@
       <div class="map-content">
         <div class="map-display">
           <svg class="map-drawing" viewBox="0 0 500 260" role="img" aria-label="种子地图"></svg>
+          <div class="spatial-tools" hidden>
+            <label>近景目标 <select class="spatial-focus" aria-label="近景目标"></select></label>
+            <button class="reset-preview" type="button">重置视角</button>
+            <span>拖动或用方向键旋转，滚轮或 + / − 缩放</span>
+          </div>
           <div class="map-key"><span><i class="key-hole"></i>黑洞伴星</span><span><i class="key-binary"></i>双星</span></div>
         </div>
         <div class="map-inspector">
@@ -75,7 +85,7 @@
             <p class="system-parameters"></p>
             <table>
               <caption>成员位置与配色</caption>
-              <thead><tr><th scope="col">名称与颜色</th><th scope="col">质量比</th><th scope="col">绕行半径</th><th scope="col">初始相位</th></tr></thead>
+              <thead><tr><th scope="col">名称与颜色</th><th scope="col">质量比</th><th scope="col">绕行半径</th><th scope="col">初始相位</th><th class="inclination" scope="col" hidden>轨道倾角</th></tr></thead>
               <tbody></tbody>
             </table>
             <p class="detail-note">质量比以本系统主星或主黑洞为基准，距离使用场景单位。</p>

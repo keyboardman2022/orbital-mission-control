@@ -2,6 +2,13 @@
 // The same projection drives rendering and pointer-to-world launch positions.
 const OrbitalCamera=(()=>{
   const angle=-.48,tilt=.66,cos=Math.cos(angle),sin=Math.sin(angle);
+  const MAX_ZOOM=64;
+  function zoomFromSlider(value,min){return min*(MAX_ZOOM/min)**(value/1000);}
+  function zoomToSlider(zoom,min){return min===MAX_ZOOM?1000:Math.round(Math.log(zoom/min)/Math.log(MAX_ZOOM/min)*1000);}
+  function wheelZoom(zoom,deltaY,deltaMode,height){
+    const delta=deltaY*(deltaMode===1?16:deltaMode===2?height:1);
+    return zoom*Math.exp(-delta*.001);
+  }
   function view(width,height,zoom=1,offset={x:0,y:0}){
     const size=Math.min(width*1.22,height*1.49)*zoom;
     return {cx:width*.54+offset.x,cy:height*.49+offset.y,size,scale:size/1100};
@@ -30,6 +37,32 @@ const OrbitalCamera=(()=>{
   function toScreen(x,y,view){
     return {x:view.cx+view.scale*(x*cos-y*tilt*sin),y:view.cy+view.scale*(x*sin+y*tilt*cos)};
   }
-  return {view,toWorld,toScreen,zoomAt,pan,followAt,originMarker,minimumZoom};
+  function sphereSilhouette({horizontal,vertical,distance},radius,view,focalLength){
+    if(Math.hypot(horizontal,vertical,distance)<=radius)return {inside:true};
+    if(distance<=0)return null;
+    // Project the tangent cone as an ellipse. As it reaches the camera plane,
+    // cap the radius for a finite contour that can still be clipped by the canvas.
+    const visibleRadius=Math.min(radius,distance*.999);
+    const axial=distance**2-visibleRadius**2;
+    const side=Math.hypot(horizontal,vertical);
+    const shift=focalLength*distance/axial;
+    return {x:view.cx+horizontal*shift,y:view.cy+vertical*shift,
+      along:focalLength*visibleRadius*Math.sqrt(axial+side**2)/axial,
+      across:focalLength*visibleRadius/Math.sqrt(axial),angle:Math.atan2(vertical,horizontal)};
+  }
+  function orbitTarget(center,pivot,from,to){
+    const x=center.x-pivot.x,y=center.y-pivot.y,z=(center.z??0)-(pivot.z??0);
+    const horizontal=x*Math.cos(from.yaw)-y*Math.sin(from.yaw);
+    const forward=x*Math.sin(from.yaw)+y*Math.cos(from.yaw);
+    const vertical=forward*Math.sin(from.pitch)-z*Math.cos(from.pitch);
+    const depth=forward*Math.cos(from.pitch)+z*Math.sin(from.pitch);
+    const rotatedForward=vertical*Math.sin(to.pitch)+depth*Math.cos(to.pitch);
+    return {
+      x:pivot.x+horizontal*Math.cos(to.yaw)+rotatedForward*Math.sin(to.yaw),
+      y:pivot.y+rotatedForward*Math.cos(to.yaw)-horizontal*Math.sin(to.yaw),
+      z:(pivot.z??0)+depth*Math.sin(to.pitch)-vertical*Math.cos(to.pitch)
+    };
+  }
+  return {view,toWorld,toScreen,sphereSilhouette,orbitTarget,zoomAt,pan,followAt,originMarker,minimumZoom,MAX_ZOOM,zoomFromSlider,zoomToSlider,wheelZoom};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalCamera;

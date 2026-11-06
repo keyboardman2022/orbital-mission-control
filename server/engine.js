@@ -33,13 +33,16 @@ class Engine{
       CREATE INDEX IF NOT EXISTS satellites_owner ON satellites(user_id,created_ms);
       CREATE TABLE IF NOT EXISTS worlds(id TEXT PRIMARY KEY,config TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS satellite_worlds(satellite_id TEXT PRIMARY KEY REFERENCES satellites(id) ON DELETE CASCADE,world_id TEXT NOT NULL REFERENCES worlds(id));
-      CREATE TABLE IF NOT EXISTS points(satellite_id TEXT NOT NULL REFERENCES satellites(id),seq INTEGER NOT NULL,tick INTEGER NOT NULL,elapsed REAL NOT NULL,x REAL NOT NULL,y REAL NOT NULL,vx REAL NOT NULL,vy REAL NOT NULL,kind TEXT NOT NULL,PRIMARY KEY(satellite_id,seq));
+      CREATE TABLE IF NOT EXISTS points(satellite_id TEXT NOT NULL REFERENCES satellites(id),seq INTEGER NOT NULL,tick INTEGER NOT NULL,elapsed REAL NOT NULL,x REAL NOT NULL,y REAL NOT NULL,vx REAL NOT NULL,vy REAL NOT NULL,kind TEXT NOT NULL,z REAL,vz REAL,PRIMARY KEY(satellite_id,seq));
       CREATE INDEX IF NOT EXISTS points_time ON points(satellite_id,tick);
       CREATE TABLE IF NOT EXISTS events(satellite_id TEXT NOT NULL REFERENCES satellites(id),seq INTEGER NOT NULL,event TEXT NOT NULL,PRIMARY KEY(satellite_id,seq));
       CREATE TABLE IF NOT EXISTS exports(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),satellite_id TEXT NOT NULL REFERENCES satellites(id),record TEXT NOT NULL);
     `);
     initializeStore(this.db);
-    this.sql={point:this.db.prepare('INSERT INTO points VALUES (?,?,?,?,?,?,?,?,?)'),event:this.db.prepare('INSERT INTO events VALUES (?,?,?)'),record:this.db.prepare('UPDATE satellites SET record=? WHERE id=?'),clock:this.db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)')};
+    if(!this.db.prepare("SELECT 1 FROM pragma_table_info('points') WHERE name='z'").get()){
+      this.transaction(()=>this.db.exec('ALTER TABLE points ADD COLUMN z REAL; ALTER TABLE points ADD COLUMN vz REAL;'));
+    }
+    this.sql={point:this.db.prepare('INSERT INTO points(satellite_id,seq,tick,elapsed,x,y,vx,vy,kind,z,vz) VALUES (?,?,?,?,?,?,?,?,?,?,?)'),event:this.db.prepare('INSERT INTO events VALUES (?,?,?)'),record:this.db.prepare('UPDATE satellites SET record=? WHERE id=?'),clock:this.db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)')};
     const meta=this.db.prepare('SELECT value FROM meta WHERE key=?');
     const config=meta.get('model');
     if(config&&JSON.parse(config.value).version!==M.MODEL.version)throw new Error('数据库模型版本与程序不匹配，拒绝静默迁移');
@@ -56,8 +59,9 @@ class Engine{
         // Keep all committed coordinates/times; extend tracking only for live records.
         if(!r.state.continuousTracking){r.state.continuousTracking=true;this.dirty.add(r.id);}
         this.records.set(r.id,r);
-        if(Math.hypot(r.state.x,r.state.y)>M.MODEL.observation.radius){
-          r.state.event={type:'out_of_observable',substepFraction:0,x:r.state.x,y:r.state.y,elapsedSeconds:r.state.elapsedSeconds};
+        const {x,y,z}=r.state,radius=z===undefined?Math.hypot(x,y):Math.hypot(x,y,z);
+        if(radius>M.MODEL.observation.radius){
+          r.state.event={type:'out_of_observable',substepFraction:0,x:r.state.x,y:r.state.y,...(r.state.z!==undefined?{z:r.state.z}:{}),elapsedSeconds:r.state.elapsedSeconds};
           this.finish(r,'out_of_observable');continue;
         }
         if(r.status==='active')this.ensureSampler(r);
@@ -149,14 +153,14 @@ class Engine{
       this.db.prepare('INSERT INTO satellites VALUES (?,?,?,?,?,?)').run(id,userId,this.now(),idem,requestHash,JSON.stringify(r));
       if(worldId)this.db.prepare('INSERT INTO satellite_worlds VALUES (?,?)').run(id,worldId);
       if(r.lastSample)this.insertPoint(r.id,r.lastSample);
-      this.db.prepare('INSERT INTO events VALUES (?,?,?)').run(id,1,JSON.stringify({type:'birth',tick:0,worldTick:r.birthTick,elapsedSeconds:0,x:r.state.x,y:r.state.y}));
+      this.db.prepare('INSERT INTO events VALUES (?,?,?)').run(id,1,JSON.stringify({type:'birth',tick:0,worldTick:r.birthTick,elapsedSeconds:0,x:r.state.x,y:r.state.y,...(initial.dimension===3?{z:r.state.z}:{})}));
     });
     this.records.set(id,r);
     if(worldId)this.recordRuntimes.set(r,runtime);
     this.ensureSampler(r);
     return this.publicRecord(r);
   }
-  insertPoint(id,p){this.sql.point.run(id,p.seq,p.tick,p.elapsedSeconds,p.x,p.y,p.vx,p.vy,p.kind);}
+  insertPoint(id,p){this.sql.point.run(id,p.seq,p.tick,p.elapsedSeconds,p.x,p.y,p.vx,p.vy,p.kind,p.z??null,p.vz??null);}
   enqueuePoint(r,p){
     if(!Budget.admit(r,p))return false;
     this.pending.push({id:r.id,p});this.dirty.add(r.id);
@@ -229,17 +233,18 @@ class Engine{
     this.pending=[];this.pendingEvents=[];this.dirty.clear();
     for(const [id,r] of this.records)if(!['active','queued'].includes(r.status)){this.records.delete(id);this.samplers.delete(id);}
   }
-  list(userId,{cursor,limit,worldId}={}){
+  list(userId,{cursor,limit,worldId,dimension}={}){
     this.worldInfo(worldId);
-    const after=integer(cursor,Number.MAX_SAFE_INTEGER),count=integer(limit,50,1,100);
+    const after=integer(cursor,Number.MAX_SAFE_INTEGER),count=integer(limit,50,1,100),space=integer(dimension,2,2,3);
     const rows=this.db.prepare(`SELECT s.rowid AS cursor,s.id,s.record FROM satellites s
       LEFT JOIN satellite_worlds sw ON sw.satellite_id=s.id
-      WHERE s.user_id=? AND s.rowid<? AND sw.world_id IS ? ORDER BY s.rowid DESC LIMIT ?`).all(userId,after,worldId??null,count+1);
+      WHERE s.user_id=? AND s.rowid<? AND sw.world_id IS ? AND COALESCE(json_extract(s.record,'$.initial.dimension'),2)=? ORDER BY s.rowid DESC LIMIT ?`).all(userId,after,worldId??null,space,count+1);
     return {satellites:rows.slice(0,count).map(row=>this.publicRecord(this.records.get(row.id)||JSON.parse(row.record))),nextCursor:rows.length>count?rows[count-1].cursor:null,server:this.health()};
   }
-  active(userId,worldId){
+  active(userId,worldId,dimension){
     this.worldInfo(worldId);
-    return {satellites:[...this.records.values()].filter(r=>r.ownerId===userId&&(r.worldId??null)===(worldId??null)&&['active','queued'].includes(r.status)).map(r=>this.publicRecord(r)),server:this.health()};
+    const space=integer(dimension,2,2,3);
+    return {satellites:[...this.records.values()].filter(r=>r.ownerId===userId&&(r.worldId??null)===(worldId??null)&&(r.initial.dimension??2)===space&&['active','queued'].includes(r.status)).map(r=>this.publicRecord(r)),server:this.health()};
   }
   trajectory(userId,id,query={}){
     const r=this.owned(userId,id);if(query.cutoffSeq===undefined)this.checkpoint();
@@ -260,11 +265,11 @@ class Engine{
     else this.finish(r,'terminated');
     if(checkpoint)this.checkpoint();return this.publicRecord(r);
   }
-  terminateMany(userId,ids,worldId){
+  terminateMany(userId,ids,worldId,dimension=2){
     this.worldInfo(worldId);
-    if(!Array.isArray(ids)||ids.length>1000||ids.some(id=>typeof id!=='string'))fail(422,'批量终止参数无效');
+    if(![2,3].includes(dimension)||!Array.isArray(ids)||ids.length>1000||ids.some(id=>typeof id!=='string'))fail(422,'批量终止参数无效');
     const unique=[...new Set(ids)];
-    for(const id of unique)if((this.owned(userId,id).worldId??null)!==(worldId??null))fail(404,'当前地图中找不到该卫星');
+    for(const id of unique){const record=this.owned(userId,id);if((record.worldId??null)!==(worldId??null)||(record.initial.dimension??2)!==dimension)fail(404,'当前地图中找不到该卫星');}
     const satellites=unique.map(id=>this.terminate(userId,id,{checkpoint:false}));this.checkpoint();return {satellites,server:this.health()};
   }
   deleteSatellite(userId,id){

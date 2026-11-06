@@ -17,6 +17,9 @@ test('HTTP launch, ownership, CSRF, persistence, pagination, recovery and export
  assert.ok(missionPage.data.indexOf('stellar-renderer.js')<missionPage.data.indexOf('mission.js'));
  const stellarAsset=await request('/stellar-renderer.js');assert.equal(stellarAsset.res.status,200);assert.match(stellarAsset.res.headers.get('content-type'),/text\/javascript/);
  assert.match(missionPage.data,/href="seed-preview\.html"/);
+ assert.match(missionPage.data,/href="map-3d\.html"/);
+ const map3D=await request('/map-3d.html');assert.equal(map3D.res.status,200);assert.match(map3D.data,/src="map-3d\.js"/);
+ for(const asset of ['/map-3d.css','/map-3d.js','/flight-controls-3d.js'])assert.equal((await request(asset)).res.status,200);
  const seedPreview=await request('/seed-preview.html');assert.equal(seedPreview.res.status,200);assert.match(seedPreview.data,/shared\/world-generator\.js/);
  for(const asset of ['/seed-preview.css','/seed-preview.js','/shared/world-generator.js'])assert.equal((await request(asset)).res.status,200);
  assert.equal((await request('/seed-preview.html',{method:'POST'})).res.status,405);
@@ -55,6 +58,15 @@ test('HTTP launch, ownership, CSRF, persistence, pagination, recovery and export
  assert.equal((await request('/api/satellites/'+ownerOne.id,a)).data.satellite.status,'active');
  const cleared=await request('/api/satellites/terminate-many',{...a,method:'POST',body:{ids:[ownerOne.id]}});assert.equal(cleared.res.status,200);assert.equal(cleared.data.satellites[0].status,'terminated');
  assert.equal((await request('/api/satellites/'+otherOne.id,otherAuth)).data.satellite.status,'active');
+ const spatial=(await request('/api/satellites',{...a,method:'POST',body:{...initial,dimension:3,
+   position:{x:330,y:0,z:100},pitchDeg:25,idempotencyKey:'sweep-owner-spatial'}})).data.satellite;
+ assert.deepEqual((await request('/api/satellites/active?dimension=3',a)).data.satellites.map(s=>s.id),[spatial.id]);
+ const spatialSweep=await request('/api/satellites/terminate-many',{...a,method:'POST',body:{ids:[spatial.id],dimension:3}});
+ assert.equal(spatialSweep.res.status,200);
+ assert.equal(spatialSweep.data.satellites[0].status,'terminated');
+ const spatialHistory=(await request('/api/satellites/'+spatial.id+'/trajectory',a)).data.points;
+ assert.equal(spatialHistory[0].z,100);
+ assert.equal(spatialHistory.at(-1).kind,'terminated');
  const deletable=(await request('/api/satellites',{...a,method:'POST',body:{...initial,idempotencyKey:'delete-api-record'}})).data.satellite;
  assert.equal((await request('/api/satellites/'+deletable.id,{...a,csrfToken:undefined,method:'DELETE'})).res.status,403);
  assert.equal((await request('/api/satellites/'+deletable.id,{...otherAuth,method:'DELETE'})).res.status,404);

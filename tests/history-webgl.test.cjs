@@ -45,9 +45,9 @@ test('single point and empty stores never invent a line',()=>{
 
 function fakeGL(){
   const calls=[];let id=0;
-  return {calls,ARRAY_BUFFER:34962,DYNAMIC_DRAW:35048,FLOAT:5126,LINE_STRIP:3,COLOR_BUFFER_BIT:16384,VERTEX_SHADER:35633,FRAGMENT_SHADER:35632,COMPILE_STATUS:35713,LINK_STATUS:35714,BLEND:3042,SRC_ALPHA:770,ONE_MINUS_SRC_ALPHA:771,
+  return {calls,ARRAY_BUFFER:34962,DYNAMIC_DRAW:35048,FLOAT:5126,POINTS:0,LINE_STRIP:3,COLOR_BUFFER_BIT:16384,VERTEX_SHADER:35633,FRAGMENT_SHADER:35632,COMPILE_STATUS:35713,LINK_STATUS:35714,BLEND:3042,SRC_ALPHA:770,ONE_MINUS_SRC_ALPHA:771,
     createShader:()=>({id:++id}),shaderSource(){},compileShader(){},getShaderParameter:()=>true,getShaderInfoLog:()=>'',createProgram:()=>({id:++id}),attachShader(){},linkProgram(){},getProgramParameter:()=>true,getProgramInfoLog:()=>'',getAttribLocation:(_p,n)=>n==='aHigh'?0:1,getUniformLocation:(_p,n)=>n,
-    createBuffer:()=>({id:++id}),bindBuffer(){},bufferData(...a){calls.push(['bufferData',...a]);},bufferSubData(...a){calls.push(['bufferSubData',...a]);},viewport(){},clearColor(){},clear(){calls.push(['clear']);},useProgram(){},enable(){},blendFunc(){},enableVertexAttribArray(){},vertexAttribPointer(...a){calls.push(['vertexAttribPointer',...a]);},uniform2f(...a){calls.push(['uniform2f',...a]);},uniform1f(...a){calls.push(['uniform1f',...a]);},drawArrays(...a){calls.push(['drawArrays',...a]);},deleteBuffer(){calls.push(['deleteBuffer']);},deleteProgram(){calls.push(['deleteProgram']);}};
+    createBuffer:()=>({id:++id}),bindBuffer(){},bufferData(...a){calls.push(['bufferData',...a]);},bufferSubData(...a){calls.push(['bufferSubData',...a]);},viewport(){},clearColor(){},clear(){calls.push(['clear']);},useProgram(){},enable(){},blendFunc(){},enableVertexAttribArray(){},vertexAttribPointer(...a){calls.push(['vertexAttribPointer',...a]);},uniform2f(...a){calls.push(['uniform2f',...a]);},uniform3f(...a){calls.push(['uniform3f',...a]);},uniform1f(...a){calls.push(['uniform1f',...a]);},drawArrays(...a){calls.push(['drawArrays',...a]);},deleteBuffer(){calls.push(['deleteBuffer']);},deleteProgram(){calls.push(['deleteProgram']);}};
 }
 function fakeCanvas(gl){const listeners={};let context=gl;return {width:0,height:0,getContext:name=>name==='webgl'?context:null,setContext:value=>context=value,addEventListener:(type,fn)=>listeners[type]=fn,removeEventListener(){},fire:(type,event={preventDefault(){}})=>listeners[type](event)};}
 
@@ -63,6 +63,20 @@ test('renderer uploads pages incrementally and draws each visible continuous seg
   assert.equal(gl.calls.filter(c=>c[0]==='bufferSubData').length,2);
   renderer.render({view:{cx:500,cy:400,scale:.1},width:1000,height:800,dpr:1,time:6,hidden:false,segments:store.visibleRanges(6)});
   assert.deepEqual(gl.calls.filter(c=>c[0]==='drawArrays').map(c=>c.slice(2)),[[0,2],[2,2]]);
+});
+
+test('3D history uploads exact altitude and draws visible saved points without lines',()=>{
+  const gl=fakeGL(),canvas=fakeCanvas(gl);
+  const store=historyGL.createStore({spatial:true,maxPoints:20});
+  const renderer=historyGL.createRenderer(canvas,{spatial:true,maxPoints:20});
+  assert.throws(()=>store.append([point(1)]));
+  renderer.append(store.append([{...point(1),z:500},{...point(2),z:600},{...point(4),z:800}]));
+  assert.equal(store.pointAt(1).z,600);
+  assert.equal(gl.calls.find(call=>call[0]==='bufferSubData')[3][2],500);
+  const view={cx:500,cy:400,scale:.1,extent:900,center:{x:10,y:20,z:30},azimuth:[0,1],elevation:[1,0]};
+  renderer.render({view,width:1000,height:800,segments:store.visibleRanges(3)});
+  assert.deepEqual(gl.calls.filter(call=>call[0]==='drawArrays'),[['drawArrays',gl.POINTS,0,2]]);
+  assert.deepEqual(store.visibleRanges(1),[{start:0,count:1}]);
 });
 
 test('context loss suspends drawing and restore reuploads retained CPU chunks',()=>{

@@ -15,9 +15,12 @@
  const toKm=(v,s=SCALE)=>v*s.kmPerUnit,fromKm=(v,s=SCALE)=>v/s.kmPerUnit;
  const toKmS=(v,s=SCALE)=>v*s.kmSPerUnit,fromKmS=(v,s=SCALE)=>v/s.kmSPerUnit;
  function telemetry(state,s=SCALE){
-   const speed=Math.hypot(state.vx,state.vy),speedKmS=toKmS(speed,s);
+   const spatial=state.z!==undefined;
+   const speed=spatial?Math.hypot(state.vx,state.vy,state.vz):Math.hypot(state.vx,state.vy),speedKmS=toKmS(speed,s);
+   const radius=spatial?Math.hypot(state.x,state.y,state.z):Math.hypot(state.x,state.y);
    return {speed,speedKmS,vxKmS:toKmS(state.vx,s),vyKmS:toKmS(state.vy,s),
-     xKm:toKm(state.x,s),yKm:toKm(state.y,s),radiusKm:toKm(Math.hypot(state.x,state.y),s),
+     xKm:toKm(state.x,s),yKm:toKm(state.y,s),radiusKm:toKm(radius,s),
+     ...(spatial?{zKm:toKm(state.z,s),vzKmS:toKmS(state.vz,s)}:{}),
      physicalElapsedSeconds:state.elapsedSeconds*s.secondsPerUnit,
      fractionOfC:speedKmS/C_KM_S,physicalSpeedValid:Number.isFinite(speedKmS)&&speedKmS<C_KM_S,
      approximation:'Paczynski-Wiita coordinate velocity; not a relativistic local measurement'};

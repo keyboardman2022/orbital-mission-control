@@ -4,6 +4,30 @@
   const finiteKeys=['tick','elapsedSeconds','x','y'];
   const ANGLE=-.48,TILT=.66,COS=Math.cos(ANGLE),SIN=Math.sin(ANGLE);
   const VERTEX=`attribute vec2 aHigh;attribute vec2 aLow;uniform vec2 uOriginHigh;uniform vec2 uOriginLow;uniform vec2 uViewport;uniform float uScale;const float C=0.8869949227792842;const float S=-0.4617791755414829;const float T=0.66;void main(){vec2 p=(aHigh-uOriginHigh)+(aLow-uOriginLow);vec2 screen=uViewport*.5+uScale*vec2(p.x*C-p.y*T*S,p.x*S+p.y*T*C);vec2 clip=screen/uViewport*2.0-1.0;gl_Position=vec4(clip.x,-clip.y,0.0,1.0);}`;
+  const SPATIAL_VERTEX=`
+    attribute vec3 aHigh;
+    attribute vec3 aLow;
+    uniform vec3 uOriginHigh;
+    uniform vec3 uOriginLow;
+    uniform vec2 uViewport;
+    uniform vec2 uCenter;
+    uniform vec2 uAzimuth;
+    uniform vec2 uElevation;
+    uniform float uExtent;
+    uniform float uScale;
+    uniform float uPointSize;
+    void main() {
+      vec3 p = ((aHigh-uOriginHigh)+(aLow-uOriginLow))/uExtent;
+      float horizontal = p.x*uAzimuth.y-p.y*uAzimuth.x;
+      float forward = dot(p.xy,uAzimuth);
+      float depth = forward*uElevation.y+p.z*uElevation.x;
+      float distance = 3.6-depth;
+      vec2 offset = vec2(horizontal,forward*uElevation.x-p.z*uElevation.y);
+      vec2 screen = uCenter+offset*uExtent*uScale*3.6/max(distance,0.06);
+      vec2 clip = screen/uViewport*2.0-1.0;
+      gl_Position = distance < 0.06 ? vec4(2.0,2.0,0.0,1.0) : vec4(clip.x,-clip.y,0.0,1.0);
+      gl_PointSize = uPointSize;
+    }`;
   const FRAGMENT=`precision mediump float;void main(){gl_FragColor=vec4(0.643,0.859,0.651,0.52);}`;
 
   function split64(value){
@@ -22,7 +46,7 @@
     return {x:width*.5+view.scale*(x*COS-y*TILT*SIN),y:height*.5+view.scale*(x*SIN+y*TILT*COS)};
   }
 
-  function createStore({maxPoints=HARD_MAX_POINTS}={}){
+  function createStore({maxPoints=HARD_MAX_POINTS,spatial=false}={}){
     if(!Number.isSafeInteger(maxPoints)||maxPoints<1||maxPoints>HARD_MAX_POINTS)throw new Error('历史点上限无效');
     let chunks=[],segments=[],pointCount=0,lastSeq=null;
 
@@ -44,13 +68,15 @@
         if(pointCount+points.length>maxPoints)throw new Error(`历史点超过 ${maxPoints} 上限`);
         let previous=lastSeq;
         for(const p of points){
-          if(!Number.isSafeInteger(p.seq)||p.seq<0||finiteKeys.some(key=>!Number.isFinite(p[key])))throw new Error('历史页包含无效点');
+          if(!Number.isSafeInteger(p.seq)||p.seq<0||finiteKeys.some(key=>!Number.isFinite(p[key]))||spatial&&!Number.isFinite(p.z))throw new Error('历史页包含无效点');
           if(previous!==null&&p.seq<=previous)throw new Error('历史序号必须严格递增');
           previous=p.seq;
         }
         const length=points.length,x=new Float64Array(length),y=new Float64Array(length),elapsedSeconds=new Float64Array(length),tick=new Float64Array(length),seq=new Uint32Array(length);
+        const z=spatial?new Float64Array(length):null;
         for(let i=0;i<length;i++){
           const p=points[i];x[i]=p.x;y[i]=p.y;elapsedSeconds[i]=p.elapsedSeconds;tick[i]=p.tick;seq[i]=p.seq;
+          if(z)z[i]=p.z;
         }
         const base=pointCount;
         for(let i=0;i<length;i++){
@@ -58,14 +84,14 @@
           if(prior===null||seq[i]!==prior+1)segments.push({start:base+i,count:1});
           else segments.at(-1).count++;
         }
-        const chunk={base,length,x,y,elapsedSeconds,tick,seq};
+        const chunk={base,length,x,y,elapsedSeconds,tick,seq,...(z?{z}:{})};
         chunks.push(chunk);pointCount+=length;lastSeq=seq[length-1];
         return chunk;
       },
       pointAt(index){
         const found=locate(index);if(!found)return null;
         const {chunk,offset}=found;
-        return {x:chunk.x[offset],y:chunk.y[offset],elapsedSeconds:chunk.elapsedSeconds[offset],tick:chunk.tick[offset],seq:chunk.seq[offset]};
+        return {x:chunk.x[offset],y:chunk.y[offset],elapsedSeconds:chunk.elapsedSeconds[offset],tick:chunk.tick[offset],seq:chunk.seq[offset],...(spatial?{z:chunk.z[offset]}:{})};
       },
       visibleRanges(time){
         if(!Number.isFinite(time))return [];
@@ -74,7 +100,7 @@
           let lo=segment.start,hi=segment.start+segment.count-1;
           if(store.pointAt(lo).elapsedSeconds>time)continue;
           while(lo<hi){const mid=Math.ceil((lo+hi)/2);if(store.pointAt(mid).elapsedSeconds<=time)lo=mid;else hi=mid-1;}
-          const count=lo-segment.start+1;if(count>1)ranges.push({start:segment.start,count});
+          const count=lo-segment.start+1;if(spatial||count>1)ranges.push({start:segment.start,count});
         }
         return ranges;
       },
@@ -87,9 +113,10 @@
     return store;
   }
 
-  function createRenderer(canvas,{maxPoints=HARD_MAX_POINTS,onStatus=()=>{}}={}){
+  function createRenderer(canvas,{maxPoints=HARD_MAX_POINTS,spatial=false,onStatus=()=>{}}={}){
     if(!Number.isSafeInteger(maxPoints)||maxPoints<1||maxPoints>HARD_MAX_POINTS)throw new Error('历史点上限无效');
     let gl=null,program=null,highBuffer=null,lowBuffer=null,locations=null,chunks=[],lost=false,destroyed=false,available=false;
+    const dimensions=spatial?3:2;
 
     function disposeGPU(){
       if(gl){if(highBuffer)gl.deleteBuffer(highBuffer);if(lowBuffer)gl.deleteBuffer(lowBuffer);if(program)gl.deleteProgram(program);}
@@ -103,29 +130,31 @@
     function initialize(){
       gl=canvas.getContext('webgl',{alpha:true,antialias:true,premultipliedAlpha:true,preserveDrawingBuffer:false});
       if(!gl)return false;
-      const vertex=shader(gl.VERTEX_SHADER,VERTEX),fragment=shader(gl.FRAGMENT_SHADER,FRAGMENT),next=gl.createProgram();
+      const vertex=shader(gl.VERTEX_SHADER,spatial?SPATIAL_VERTEX:VERTEX),fragment=shader(gl.FRAGMENT_SHADER,FRAGMENT),next=gl.createProgram();
       gl.attachShader(next,vertex);gl.attachShader(next,fragment);gl.linkProgram(next);
       if(!gl.getProgramParameter(next,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(next)||'轨迹着色器链接失败');
       program=next;locations={high:gl.getAttribLocation(program,'aHigh'),low:gl.getAttribLocation(program,'aLow'),originHigh:gl.getUniformLocation(program,'uOriginHigh'),originLow:gl.getUniformLocation(program,'uOriginLow'),viewport:gl.getUniformLocation(program,'uViewport'),scale:gl.getUniformLocation(program,'uScale')};
+      if(spatial)for(const name of ['Center','Azimuth','Elevation','Extent','PointSize'])locations[name]=gl.getUniformLocation(program,'u'+name);
       gl.useProgram(program);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
       return true;
     }
     function ensureBuffers(){
       if(highBuffer&&lowBuffer)return;
-      const bytes=maxPoints*2*Float32Array.BYTES_PER_ELEMENT;
+      const bytes=maxPoints*dimensions*Float32Array.BYTES_PER_ELEMENT;
       highBuffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,highBuffer);gl.bufferData(gl.ARRAY_BUFFER,bytes,gl.DYNAMIC_DRAW);
       lowBuffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,lowBuffer);gl.bufferData(gl.ARRAY_BUFFER,bytes,gl.DYNAMIC_DRAW);
     }
     function encoded(chunk){
-      const high=new Float32Array(chunk.length*2),low=new Float32Array(chunk.length*2);
+      const high=new Float32Array(chunk.length*dimensions),low=new Float32Array(chunk.length*dimensions);
       for(let i=0;i<chunk.length;i++){
-        const x=split64(chunk.x[i]),y=split64(-chunk.y[i]),at=i*2;
+        const x=split64(chunk.x[i]),y=split64(spatial?chunk.y[i]:-chunk.y[i]),at=i*dimensions;
         high[at]=x.high;high[at+1]=y.high;low[at]=x.low;low[at+1]=y.low;
+        if(spatial){const z=split64(chunk.z[i]);high[at+2]=z.high;low[at+2]=z.low;}
       }
       return {high,low};
     }
     function upload(chunk){
-      ensureBuffers();const data=encoded(chunk),offset=chunk.base*2*Float32Array.BYTES_PER_ELEMENT;
+      ensureBuffers();const data=encoded(chunk),offset=chunk.base*dimensions*Float32Array.BYTES_PER_ELEMENT;
       gl.bindBuffer(gl.ARRAY_BUFFER,highBuffer);gl.bufferSubData(gl.ARRAY_BUFFER,offset,data.high);
       gl.bindBuffer(gl.ARRAY_BUFFER,lowBuffer);gl.bufferSubData(gl.ARRAY_BUFFER,offset,data.low);
     }
@@ -155,12 +184,26 @@
         const pixelWidth=Math.max(1,Math.round(width*dpr)),pixelHeight=Math.max(1,Math.round(height*dpr));
         if(canvas.width!==pixelWidth)canvas.width=pixelWidth;if(canvas.height!==pixelHeight)canvas.height=pixelHeight;
         gl.viewport(0,0,pixelWidth,pixelHeight);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.useProgram(program);
-        if(!highBuffer||!lowBuffer||!segments.some(segment=>segment.count>1))return true;
-        const origin=worldOrigin(view,width,height);
-        gl.uniform2f(locations.originHigh,origin.x.high,origin.y.high);gl.uniform2f(locations.originLow,origin.x.low,origin.y.low);gl.uniform2f(locations.viewport,width,height);gl.uniform1f(locations.scale,view.scale);
-        gl.bindBuffer(gl.ARRAY_BUFFER,highBuffer);gl.enableVertexAttribArray(locations.high);gl.vertexAttribPointer(locations.high,2,gl.FLOAT,false,0,0);
-        gl.bindBuffer(gl.ARRAY_BUFFER,lowBuffer);gl.enableVertexAttribArray(locations.low);gl.vertexAttribPointer(locations.low,2,gl.FLOAT,false,0,0);
-        for(const segment of segments)if(segment.count>1)gl.drawArrays(gl.LINE_STRIP,segment.start,segment.count);
+        const minimum=spatial?1:2;
+        if(!highBuffer||!lowBuffer||!segments.some(segment=>segment.count>=minimum))return true;
+        if(spatial){
+          const x=split64(view.center.x),y=split64(view.center.y),z=split64(view.center.z??0);
+          gl.uniform3f(locations.originHigh,x.high,y.high,z.high);
+          gl.uniform3f(locations.originLow,x.low,y.low,z.low);
+          gl.uniform2f(locations.Center,view.cx,view.cy);
+          gl.uniform2f(locations.Azimuth,...view.azimuth);
+          gl.uniform2f(locations.Elevation,...view.elevation);
+          gl.uniform1f(locations.Extent,view.extent);
+          gl.uniform1f(locations.PointSize,1.7*dpr);
+        }else{
+          const origin=worldOrigin(view,width,height);
+          gl.uniform2f(locations.originHigh,origin.x.high,origin.y.high);
+          gl.uniform2f(locations.originLow,origin.x.low,origin.y.low);
+        }
+        gl.uniform2f(locations.viewport,width,height);gl.uniform1f(locations.scale,view.scale);
+        gl.bindBuffer(gl.ARRAY_BUFFER,highBuffer);gl.enableVertexAttribArray(locations.high);gl.vertexAttribPointer(locations.high,dimensions,gl.FLOAT,false,0,0);
+        gl.bindBuffer(gl.ARRAY_BUFFER,lowBuffer);gl.enableVertexAttribArray(locations.low);gl.vertexAttribPointer(locations.low,dimensions,gl.FLOAT,false,0,0);
+        for(const segment of segments)if(segment.count>=minimum)gl.drawArrays(spatial?gl.POINTS:gl.LINE_STRIP,segment.start,segment.count);
         return true;
       },
       clear(){chunks=[];if(gl){if(highBuffer)gl.deleteBuffer(highBuffer);if(lowBuffer)gl.deleteBuffer(lowBuffer);}highBuffer=null;lowBuffer=null;},

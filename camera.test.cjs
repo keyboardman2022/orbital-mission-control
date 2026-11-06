@@ -3,6 +3,41 @@ const assert=require('node:assert/strict');
 const Camera=require('./camera.js');
 const P=require('./physics.js');
 
+test('orbiting an off-center target preserves its screen position and perspective scale',()=>{
+ const pivot={x:1940,y:-1000,z:720},center={x:200,y:600,z:-320};
+ const before={yaw:-.38,pitch:.7},after={yaw:1.42,pitch:-1.08};
+ const view={cx:250,cy:190,scale:.24};
+ function project(point,origin,{yaw,pitch}){
+  const x=point.x-origin.x,y=point.y-origin.y,z=point.z-origin.z;
+  const forward=x*Math.sin(yaw)+y*Math.cos(yaw);
+  const scale=view.scale*3.6/(3.6-(forward*Math.cos(pitch)+z*Math.sin(pitch))/8000);
+  return {x:view.cx+(x*Math.cos(yaw)-y*Math.sin(yaw))*scale,
+   y:view.cy+(forward*Math.sin(pitch)-z*Math.cos(pitch))*scale,scale};
+ }
+ const next=Camera.orbitTarget(center,pivot,before,after);
+ const a=project(pivot,center,before),b=project(pivot,next,after);
+ for(const key of ['x','y','scale'])assert.ok(Math.abs(a[key]-b[key])<1e-10);
+ const neighbor={x:2200,y:-2000,z:100};
+ assert.notDeepEqual(project(neighbor,center,before),project(neighbor,next,after));
+ const returned=Camera.orbitTarget(next,pivot,after,before);
+ for(const key of ['x','y','z'])assert.ok(Math.abs(returned[key]-center[key])<1e-10);
+});
+
+test('the projected sphere has a circular silhouette on axis and tangent edges off axis',()=>{
+ const view={cx:400,cy:300},focalLength=240,radius=2;
+ const centered=Camera.sphereSilhouette({horizontal:0,vertical:0,distance:5},radius,view,focalLength);
+ assert.equal(centered.x,view.cx);
+ assert.ok(Math.abs(centered.along-centered.across)<1e-10);
+ const sphere={horizontal:3,vertical:0,distance:5};
+ const offset=Camera.sphereSilhouette(sphere,radius,view,focalLength);
+ for(const edge of [offset.x-offset.along,offset.x+offset.along]){
+  const rayX=(edge-view.cx)/focalLength;
+  const distanceToRay=Math.abs(sphere.horizontal-sphere.distance*rayX)/Math.hypot(rayX,1);
+  assert.ok(Math.abs(distanceToRay-radius)<1e-10);
+ }
+ assert.deepEqual(Camera.sphereSilhouette({horizontal:0,vertical:0,distance:1},radius,view,focalLength),{inside:true});
+});
+
 test('observation radius matches a ten-minute PW orbit without imposing a gravity cutoff',()=>{
  const M=require('./shared/simulation.js'),U=require('./shared/units.js');
  const radius=M.circularRadiusForPeriod(600);

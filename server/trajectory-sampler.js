@@ -8,7 +8,7 @@ const POLICY = Object.freeze({
   interpolation:'linear-time', guarantee:'sampled-integrator-times'
 });
 const FIELDS = ['tick','elapsedSeconds','x','y','vx','vy'];
-const WIDTH = FIELDS.length, CAPACITY = POLICY.blockTicks + 1;
+const CAPACITY = POLICY.blockTicks + 1;
 
 function policyFor(calibration = SCALE, options = {}) {
   if (!calibration || !Number.isFinite(calibration.kmPerUnit) || calibration.kmPerUnit <= 0 ||
@@ -29,6 +29,8 @@ function policyFor(calibration = SCALE, options = {}) {
 // already been emitted by the caller; each flush emits only subsequent states.
 function createSampler(anchor, calibration = SCALE, options = {}) {
   const policy = policyFor(calibration,options);
+  const spatial=anchor.z!==undefined,fields=spatial?[...FIELDS,'z','vz']:FIELDS;
+  const WIDTH=fields.length;
   const values = new Float64Array(CAPACITY * WIDTH);
   const kinds = new Array(CAPACITY);
   const retained = new Uint8Array(CAPACITY);
@@ -43,13 +45,13 @@ function createSampler(anchor, calibration = SCALE, options = {}) {
     if (count && (snapshot.tick < values[offset - WIDTH] || snapshot.elapsedSeconds < values[offset - WIDTH + 1])) {
       throw new RangeError('Sampler snapshots must be ordered by tick and elapsedSeconds');
     }
-    for (let field = 0; field < WIDTH; field++) values[offset + field] = snapshot[FIELDS[field]];
+    for (let field = 0; field < WIDTH; field++) values[offset + field] = snapshot[fields[field]];
     kinds[count] = snapshot.kind ?? 'sample';
     count++;
   }
   function snapshotAt(index) {
     const result = {};
-    for (let field = 0; field < WIDTH; field++) result[FIELDS[field]] = values[index * WIDTH + field];
+    for (let field = 0; field < WIDTH; field++) result[fields[field]] = values[index * WIDTH + field];
     result.kind = kinds[index];
     return result;
   }
@@ -73,10 +75,11 @@ function createSampler(anchor, calibration = SCALE, options = {}) {
         const fraction = (values[offset + 1] - values[a + 1]) / duration;
         const error = field => values[offset + field] -
           (values[a + field] + (values[b + field] - values[a + field]) * fraction);
-        const positionError = Math.hypot(error(2), error(3)) / policy.positionToleranceScene;
+        const positionError = (spatial?Math.hypot(error(2),error(3),error(6)):Math.hypot(error(2),error(3))) / policy.positionToleranceScene;
+        const vx=values[offset+4],vy=values[offset+5];
         const velocityLimit = Math.max(policy.velocityToleranceScene,
-          policy.velocityRelativeTolerance * Math.hypot(values[offset + 4],values[offset + 5]));
-        const velocityError = Math.hypot(error(4), error(5)) / velocityLimit;
+          policy.velocityRelativeTolerance * (spatial?Math.hypot(vx,vy,values[offset+7]):Math.hypot(vx,vy)));
+        const velocityError = (spatial?Math.hypot(error(4),error(5),error(7)):Math.hypot(error(4),error(5))) / velocityLimit;
         // Invalid integrator states must survive as exact error evidence.
         const ratio = Number.isFinite(positionError) && Number.isFinite(velocityError)
           ? Math.max(positionError, velocityError) : Infinity;

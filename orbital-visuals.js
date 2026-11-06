@@ -2,22 +2,24 @@
 // Reuse the original ORBITAL dust textures, rotating bands, infall and photon glints.
 const OrbitalVisuals=(()=>{
   const BLACK_HOLE_VISUAL_SCALE=1.65;
+  const satelliteVisualMass=mass=>Math.max(1,Math.min(3,1+Math.log10(Math.max(1,mass)/1000+1)*.6));
   function satelliteAppearance(scale,mass=1){
     const radius=Number.isFinite(scale)&&scale>0?20*Math.max(0,mass)*scale:0;
     // Subpixel coverage fades out; there is no minimum screen-space marker size.
     return {radius,opacity:.85*Math.min(1,(radius/2)**2)};
   }
-  function stellarAppearance(scale,star){
+  function stellarAppearance(scale,star,displayScale=1){
     const collisionRadius=Math.max(0,star?.collisionRadius??star?.radius??0);
     const visualScale=Number.isFinite(scale)&&scale>0?scale:0;
     const physicalRadius=collisionRadius*visualScale;
     // Enlarge the rendered disc by 15% while retaining the physical collision radius.
     const worldRadius=collisionRadius>0?(6+14*Math.min(1,collisionRadius/86)**.7)*(108.9/96)*1.15:0;
-    const radius=worldRadius*visualScale;
+    const radius=worldRadius*visualScale*displayScale;
     return {physicalRadius,radius,markerRadius:radius,opacity:Math.min(1,(radius/.7)**2)};
   }
   function planetDisplayRadius(physicalRadius,smallestStarRadius){
-    // Seeded planets range from 5 to 13 scene units in physical radius.
+    // Dwarf planets have a smaller disc than the minimum ordinary planet.
+    if(physicalRadius<5)return smallestStarRadius*.16*Math.max(0,physicalRadius)/5;
     const fraction=Math.max(0,Math.min(1,(physicalRadius-5)/8));
     return smallestStarRadius*(.16+.09*fraction);
   }
@@ -35,13 +37,40 @@ const OrbitalVisuals=(()=>{
     surface.addColorStop(0,'#fff1c9');surface.addColorStop(.35,color);surface.addColorStop(.85,color+'e0');surface.addColorStop(1,color+'70');
     ctx.beginPath();ctx.arc(p.x,p.y,core,0,Math.PI*2);ctx.fillStyle=surface;ctx.fill();ctx.restore();
   }
-  function renderSatellite(ctx,p,scale,mass=1){
+  function renderSatellite(ctx,p,scale,mass=1,selectedName){
     const {radius:r,opacity}=satelliteAppearance(scale,mass);
     if(opacity<.001)return;
     ctx.save();ctx.globalCompositeOperation='source-over';ctx.globalAlpha=opacity;
     const glow=ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,r);
     glow.addColorStop(0,'#fff9e8');glow.addColorStop(.1,'#ffe4ab');glow.addColorStop(.3,'#ff9e5377');glow.addColorStop(1,'transparent');
-    ctx.fillStyle=glow;ctx.fillRect(p.x-r,p.y-r,r*2,r*2);ctx.restore();
+    ctx.fillStyle=glow;ctx.fillRect(p.x-r,p.y-r,r*2,r*2);
+    if(selectedName!==undefined){
+      ctx.strokeStyle='#ffe5ad88';ctx.lineWidth=Math.min(1,scale/.4);
+      ctx.beginPath();ctx.arc(p.x,p.y,Math.min(9,r*1.1),0,Math.PI*2);ctx.stroke();
+      if(r>=1.5){
+        ctx.fillStyle='#fff0c7';ctx.font='11px ui-monospace,monospace';
+        ctx.fillText(selectedName.slice(0,24),p.x+14,p.y+4);
+      }
+    }
+    ctx.restore();
+  }
+  function renderTrailPoints(ctx,points,project,mass=1){
+    const occupied=new Set();
+    ctx.save();ctx.globalCompositeOperation='source-over';ctx.fillStyle='#ffbb6d';
+    // Keep the newest sample per screen pixel so distant trajectories don't build up light.
+    for(let i=points.length-1;i>=0;i--){
+      const point=project(points[i]);
+      if(!point)continue;
+      const opacity=.68*Math.min(1,(point.scale/.18)**2)*(i+1)/points.length;
+      if(opacity<.001)continue;
+      const pixel=Math.floor(point.x)+','+Math.floor(point.y);
+      if(occupied.has(pixel))continue;
+      occupied.add(pixel);
+      const radius=Math.min(.8,1.875*mass*point.scale);
+      ctx.globalAlpha=opacity;
+      ctx.beginPath();ctx.arc(point.x,point.y,radius,0,Math.PI*2);ctx.fill();
+    }
+    ctx.restore();
   }
   function renderTrail(ctx,points,project,mass=1,scale=.4){
     const opacity=.8*Math.min(1,(Math.max(0,scale)/.18)**2);
@@ -104,7 +133,7 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
 
     makeRing(135);
     function blackhole(ctx,w,h,view,t,color){
-      const {size,cx,cy,scale}=view;
+      const {size,cx,cy,scale,diskAngle=-.48,diskTilt=.66}=view;
   let hue=135;
   if(color){
     const rgb=Number.parseInt(color.slice(1),16),r=rgb>>16,g=(rgb>>8)&255,b=rgb&255;
@@ -115,7 +144,7 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
   halo.addColorStop(0,`hsla(${hue},45%,45%,.03)`);
   halo.addColorStop(.28,`hsla(${hue},45%,48%,.17)`);
   halo.addColorStop(1,'transparent');ctx.fillStyle=halo;ctx.fillRect(0,0,w,h);
-  ctx.save();ctx.translate(cx,cy);ctx.rotate(-.48);ctx.scale(scale,scale*.66);
+  ctx.save();ctx.translate(cx,cy);ctx.rotate(diskAngle);ctx.scale(scale,scale*diskTilt);
   const corona=ctx.createRadialGradient(0,0,164,0,0,400);
   corona.addColorStop(0,'transparent');corona.addColorStop(.055,`hsla(${hue},40%,83%,.7)`);
   corona.addColorStop(.16,`hsla(${hue},52%,62%,.27)`);corona.addColorStop(.55,`hsla(${hue},38%,50%,.06)`);corona.addColorStop(1,'transparent');
@@ -153,9 +182,9 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
   ctx.beginPath();ctx.arc(0,0,171,0,Math.PI*2);ctx.fillStyle=core;ctx.fill();
   ctx.restore();
   // Anamorphic light glints follow hot spots without obscuring the event horizon.
-  ctx.save();ctx.translate(cx,cy);ctx.rotate(-.48);
+  ctx.save();ctx.translate(cx,cy);ctx.rotate(diskAngle);
   for(let i=0;i<2;i++){
-    const a=t*angularSpeed(200)*.55+i*Math.PI,r=181*scale,x=Math.cos(a)*r,y=Math.sin(a)*r*.66;
+    const a=t*angularSpeed(200)*.55+i*Math.PI,r=181*scale,x=Math.cos(a)*r,y=Math.sin(a)*r*diskTilt;
     const glint=ctx.createRadialGradient(x,y,0,x,y,36*scale);
     glint.addColorStop(0,'rgba(239,255,242,.75)');glint.addColorStop(.12,`hsla(${hue},50%,80%,.38)`);glint.addColorStop(1,'transparent');
     ctx.fillStyle=glint;ctx.fillRect(x-40*scale,y-40*scale,80*scale,80*scale);
@@ -198,6 +227,6 @@ const infall = Array.from({length:75}, () => ({angle:random()*Math.PI*2,phase:ra
     for(const f of wave.flares||[]){const age=wave.age-f.born,alpha=Math.max(0,1-age/.5);ctx.fillStyle=`rgba(255,219,157,${alpha})`;for(let i=0;i<8;i++){const angle=i*Math.PI/4;ctx.beginPath();ctx.arc(f.x+Math.cos(angle)*age*65,f.y+Math.sin(angle)*age*65,Math.max(.5,2*alpha),0,Math.PI*2);ctx.fill();}}
     ctx.restore();
   }
-  return {create,satelliteAppearance,stellarAppearance,planetDisplayRadius,blackHoleAppearance,renderStar,renderSatellite,renderTrail,renderMapImpact};
+  return {create,satelliteVisualMass,satelliteAppearance,stellarAppearance,planetDisplayRadius,blackHoleAppearance,renderStar,renderSatellite,renderTrail,renderTrailPoints,renderMapImpact};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalVisuals;

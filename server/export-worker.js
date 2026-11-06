@@ -29,13 +29,17 @@ async function run(){
     }
     metadata.calibration=record.satellite.calibration||U.SCALE;
     metadata.physicalUnits={distance:'km',speed:'km/s',time:'s',mass:'kg'};
+    const spatial=record.satellite.initial.dimension===3;
+    const coordinates=spatial?'世界坐标 XY 为星系平面，+Z 为平面上方；':'世界坐标 +Y 向上；';
+    const components=spatial?'x/y/z/vx/vy/vz':'x/y/vx/vy';
+    if(spatial)metadata.coordinates={dimension:3,orbitalPlane:'XY',verticalAxis:'+Z'};
     metadata.description=metadata.trajectoryCoverage?.truncated
-      ?'世界坐标 +Y 向上；轨迹坐标仅覆盖出生至约 100 MiB 存储上限，卫星当前或最终状态及生命周期事件可能晚于轨迹末端。原始 x/y/vx/vy 为场景单位，另附 km 和 km/s 换算。伪牛顿模型不是相对论测量。'
-      :'世界坐标 +Y 向上；原始 x/y/vx/vy 为场景单位，另附 km 和 km/s 换算。'+(record.world?'天体质量及轨道见 world。':'10 倍标称太阳质量为假设示例；历史记录的换算会标记 calibrationInferred。')+'伪牛顿模型不是相对论测量；physicalSpeedValid=false 时，speedKmS 不可视为真实物理速度。记录为采样点，并非每一步积分。';
+      ?coordinates+'轨迹坐标仅覆盖出生至约 100 MiB 存储上限，卫星当前或最终状态及生命周期事件可能晚于轨迹末端。原始 '+components+' 为场景单位，另附 km 和 km/s 换算。伪牛顿模型不是相对论测量。'
+      :coordinates+'原始 '+components+' 为场景单位，另附 km 和 km/s 换算。'+(record.world?'天体质量及轨道见 world。':'10 倍标称太阳质量为假设示例；历史记录的换算会标记 calibrationInferred。')+'伪牛顿模型不是相对论测量；physicalSpeedValid=false 时，speedKmS 不可视为真实物理速度。记录为采样点，并非每一步积分。';
     metadata.events=db.prepare('SELECT event FROM events WHERE satellite_id=? AND seq<=? ORDER BY seq').all(record.satelliteId,record.cutoffEventSeq).map(row=>JSON.parse(row.event));
     const csv=value=>{let s=String(value??'');if(typeof value==='string'&&/^[=+@\-\t\r\n]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';};
     if(record.format==='json')await write(JSON.stringify(metadata).slice(0,-1)+',"points":[');
-    else await write('\uFEFFsatellite_id,name,elapsed_sim_seconds,tick,event_type,x,y,vx,vy,radius,speed,elapsed_physical_seconds,x_km,y_km,vx_km_s,vy_km_s,radius_km,speed_km_s,physical_speed_valid,metadata_json\r\n');
+    else await write('\uFEFFsatellite_id,name,elapsed_sim_seconds,tick,event_type,x,y,vx,vy,radius,speed,elapsed_physical_seconds,x_km,y_km,vx_km_s,vy_km_s,radius_km,speed_km_s,physical_speed_valid'+(spatial?',z,vz,z_km,vz_km_s':'')+',metadata_json\r\n');
     let first=true;
     let cursor=0;
     while(true){
@@ -44,7 +48,7 @@ async function run(){
      for(const p of page){
       const physical=U.telemetry(p,metadata.calibration);
       if(record.format==='json')await write((first?'':',')+JSON.stringify({...p,...physical}));
-      else await write([record.satelliteId,record.satellite.name,p.elapsedSeconds,p.tick,p.kind,p.x,p.y,p.vx,p.vy,Math.hypot(p.x,p.y),physical.speed,physical.physicalElapsedSeconds,physical.xKm,physical.yKm,physical.vxKmS,physical.vyKmS,physical.radiusKm,physical.speedKmS,physical.physicalSpeedValid,first?JSON.stringify(metadata):''].map(csv).join(',')+'\r\n');
+      else await write([record.satelliteId,record.satellite.name,p.elapsedSeconds,p.tick,p.kind,p.x,p.y,p.vx,p.vy,spatial?Math.hypot(p.x,p.y,p.z):Math.hypot(p.x,p.y),physical.speed,physical.physicalElapsedSeconds,physical.xKm,physical.yKm,physical.vxKmS,physical.vyKmS,physical.radiusKm,physical.speedKmS,physical.physicalSpeedValid,...(spatial?[p.z,p.vz,physical.zKm,physical.vzKmS]:[]),first?JSON.stringify(metadata):''].map(csv).join(',')+'\r\n');
       first=false;
      }
      cursor=page.at(-1).seq;

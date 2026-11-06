@@ -4,7 +4,12 @@ const {dirname,join,basename}=require('node:path');
 const {createHash,randomUUID}=require('node:crypto');
 const {gzipSync,gunzipSync}=require('node:zlib');
 const MAX_POINTS=4096,MAX_BYTES=4*1024*1024;
-const columns='seq,tick,elapsed AS elapsedSeconds,x,y,vx,vy,kind';
+const spatialSchemas=new WeakMap();
+function pointColumns(db){
+ if(!spatialSchemas.has(db))spatialSchemas.set(db,db.prepare("SELECT 1 FROM pragma_table_info('points') WHERE name='z'").get()!==undefined);
+ return 'seq,tick,elapsed AS elapsedSeconds,x,y,vx,vy,kind'+(spatialSchemas.get(db)?',z,vz':'');
+}
+function pointRecord({z,vz,...point}){return z==null?point:{...point,z,vz};}
 const checksum=bytes=>createHash('sha256').update(bytes).digest('hex');
 function initializeStore(db){db.exec(`CREATE TABLE IF NOT EXISTS trajectory_chunks(
  satellite_id TEXT NOT NULL REFERENCES satellites(id),first_seq INTEGER NOT NULL,last_seq INTEGER NOT NULL,
@@ -24,11 +29,12 @@ function readChunk(filename,manifest){
  const points=JSON.parse(gunzipSync(compressed,{maxOutputLength:MAX_BYTES}).toString('utf8'));
  if(!Array.isArray(points)||points.length!==manifest.count||points.length<1||points.length>MAX_POINTS)throw Error('Invalid trajectory archive point count');
  let seq=0,tick=-1;
- for(const p of points){if(!Number.isSafeInteger(p.seq)||p.seq<=seq||!Number.isSafeInteger(p.tick)||p.tick<tick||!['elapsedSeconds','x','y','vx','vy'].every(k=>Number.isFinite(p[k]))||typeof p.kind!=='string')throw Error('Invalid trajectory archive point');seq=p.seq;tick=p.tick;}
+ for(const p of points){if(!Number.isSafeInteger(p.seq)||p.seq<=seq||!Number.isSafeInteger(p.tick)||p.tick<tick||!['elapsedSeconds','x','y','vx','vy'].every(k=>Number.isFinite(p[k]))||(p.z!==undefined||p.vz!==undefined)&&![p.z,p.vz].every(Number.isFinite)||typeof p.kind!=='string')throw Error('Invalid trajectory archive point');seq=p.seq;tick=p.tick;}
  if(points[0].seq!==manifest.first_seq||points.at(-1).seq!==manifest.last_seq||points[0].tick!==manifest.first_tick||points.at(-1).tick!==manifest.last_tick)throw Error('Trajectory archive manifest mismatch');return points;
 }
 function readTransaction(db,fn){const own=!db.isTransaction;if(own)db.exec('BEGIN');try{const result=fn();if(own)db.exec('COMMIT');return result;}catch(error){if(own)db.exec('ROLLBACK');throw error;}}
 function readPoints(db,filename,{id,after=0,fromTick=0,toTick=Number.MAX_SAFE_INTEGER,cutoffSeq=Number.MAX_SAFE_INTEGER,limit=1000,boundaries=false}={}){
+ const columns=pointColumns(db);
  if(typeof id!=='string'||![after,fromTick,toTick,cutoffSeq,limit].every(Number.isSafeInteger)||after<0||fromTick<0||toTick<fromTick||cutoffSeq<0||limit<1||limit>5001)throw Error('Invalid trajectory read parameters');
  if(after>=cutoffSeq)return [];
  const snapshot=readTransaction(db,()=>{
@@ -58,14 +64,14 @@ function readPoints(db,filename,{id,after=0,fromTick=0,toTick=Number.MAX_SAFE_IN
   if(snapshot.afterManifest)for(const p of load(snapshot.afterManifest))if(p.seq<=cutoffSeq&&p.tick>toTick&&(!next||p.seq<next.seq))next=p;
   if(before&&before.seq>after)candidates.push(before);if(next&&next.seq>after)candidates.push(next);
  }
- return [...new Map(candidates.map(p=>[p.seq,p])).values()].sort((a,b)=>a.seq-b.seq).slice(0,limit).map(p=>({...p}));
+ return [...new Map(candidates.map(p=>[p.seq,p])).values()].sort((a,b)=>a.seq-b.seq).slice(0,limit).map(pointRecord);
 }
 function archiveBatch(db,filename,{cutoffWorldTick,maxPoints=MAX_POINTS}={}){
  if(!Number.isSafeInteger(cutoffWorldTick)||cutoffWorldTick<0||!Number.isSafeInteger(maxPoints)||maxPoints<1)throw Error('Invalid trajectory archive parameters');
  if(db.isTransaction)throw Error('Archive requires its own transaction');initializeStore(db);maxPoints=Math.min(maxPoints,MAX_POINTS);
  const oldest=db.prepare(`SELECT s.id AS satellite_id,json_extract(s.record,'$.birthTick') AS birth_tick FROM satellites s WHERE json_extract(s.record,'$.birthTick') IS NOT NULL AND EXISTS(SELECT 1 FROM points p WHERE p.satellite_id=s.id AND p.tick<?-json_extract(s.record,'$.birthTick')) LIMIT 1`).get(cutoffWorldTick);
  if(!oldest)return null;
- const points=db.prepare(`SELECT ${columns} FROM points WHERE satellite_id=? AND tick<? ORDER BY seq LIMIT ?`).all(oldest.satellite_id,cutoffWorldTick-oldest.birth_tick,maxPoints);
+ const points=db.prepare(`SELECT ${pointColumns(db)} FROM points WHERE satellite_id=? AND tick<? ORDER BY seq LIMIT ?`).all(oldest.satellite_id,cutoffWorldTick-oldest.birth_tick,maxPoints).map(pointRecord);
  const compressed=gzipSync(Buffer.from(JSON.stringify(points))),digest=checksum(compressed),file=digest+'-'+randomUUID()+'.json.gz';
  const manifest={satellite_id:oldest.satellite_id,first_seq:points[0].seq,last_seq:points.at(-1).seq,first_tick:points[0].tick,last_tick:points.at(-1).tick,count:points.length,file,checksum:digest};
  const directory=join(dirname(filename),'trajectories');fs.mkdirSync(directory,{recursive:true});const path=archivePath(filename,file),temporary=path+'.partial';

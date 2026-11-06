@@ -46,6 +46,8 @@ h1 { margin: 8px 0 7px; font-size: clamp(30px, 5vw, 44px); letter-spacing: -.04e
 .count-fields { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .count-fields label { display: grid; gap: 6px; font-size: 13px; }
 #count-help { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+#body-profile-help { margin-top: 8px; color: var(--muted); font-size: 12px; }
+#body-profile-help summary { color: var(--cyan); cursor: pointer; }
 .input-error { margin: 0; color: #ffb5b5; font-size: 13px; }
 .generate-button { padding: 0 17px; background: var(--cyan); border-color: var(--cyan); color: #101822; font-weight: 750; }
 .generate-button:hover { background: #c0f3ff; color: #101822; }
@@ -61,11 +63,19 @@ h1 { margin: 8px 0 7px; font-size: clamp(30px, 5vw, 44px); letter-spacing: -.04e
 .map-content { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); }
 .map-display { display: flex; flex-direction: column; justify-content: center; background: #080d18; border-right: 1px solid var(--line); }
 .map-drawing { display: block; width: 100%; aspect-ratio: 500 / 260; }
+.map-drawing.spatial { cursor: grab; touch-action: none; }
+.map-drawing.spatial:active { cursor: grabbing; }
+.spatial-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 0 14px 12px; color: var(--muted); font-size: 12px; }
+.spatial-tools select { max-width: 165px; padding: 7px; border: 1px solid var(--line); border-radius: 6px; background: #111623; color: var(--text); }
+.spatial-tools button { min-height: 32px; padding: 0 8px; }
+.spatial-tools span { flex-basis: 100%; }
 .map-key { display: flex; justify-content: center; gap: 18px; padding: 0 12px 12px; color: var(--muted); font-size: 11px; }
 .map-key span { display: flex; gap: 6px; align-items: center; }
 .map-key i { display: inline-block; width: 8px; height: 8px; border: 1px solid #b4c2df; border-radius: 50%; }
 .map-key .key-binary { background: #b4c2df; border-radius: 1px; transform: rotate(45deg); }
 .map-stats { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; border-block: 1px solid var(--line); }
+.spatial-card .map-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.spatial-card th:first-child, .spatial-card td:first-child { width: 32%; }
 .map-stats div { padding: 13px 16px; }
 .map-stats div + div { border-left: 1px solid var(--line); }
 .map-stats dt { color: var(--muted); font-size: 12px; }

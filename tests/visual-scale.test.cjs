@@ -20,6 +20,22 @@ test('satellite and trail do not add brightness; unresolved far objects produce 
  assert.ok(ctx.strokes.every(s=>s.blend==='source-over'&&s.width<.8&&s.opacity<.1));
  const count=ctx.strokes.length;V.renderTrail(ctx,points,project,3,1e-7);assert.equal(ctx.strokes.length,count);
 });
+test('3D trail points fade with zoom and overlapping samples use one pixel of coverage',()=>{
+ const ctx=context(),arcs=[];
+ ctx.arc=(x,y,r)=>arcs.push({x,y,r,opacity:ctx.globalAlpha});
+ ctx.fill=()=>{};
+ const points=[{x:20.2,y:20,scale:.09},{x:20.6,y:20.4,scale:.09},{x:24,y:20,scale:.09}];
+ V.renderTrailPoints(ctx,points,point=>point);
+ assert.equal(arcs.length,2);
+ assert.ok(arcs.some(arc=>arc.x===20.6));
+ const near=arcs[0];arcs.length=0;
+ V.renderTrailPoints(ctx,points,point=>({...point,scale:.009}));
+ assert.ok(Math.abs(arcs[0].r/near.r-.1)<1e-10);
+ assert.ok(arcs[0].opacity<near.opacity/90);
+ arcs.length=0;
+ V.renderTrailPoints(ctx,points,point=>({...point,scale:.0001}));
+ assert.equal(arcs.length,0);
+});
 test('orbiting star cores and physical glow both scale with zoom',()=>{
  const near=V.stellarAppearance(1,{collisionRadius:20}),far=V.stellarAppearance(.01,{collisionRadius:20});
  assert.equal(near.physicalRadius,20);assert.equal(far.physicalRadius,.2);

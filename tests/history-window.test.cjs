@@ -124,7 +124,7 @@ test('loadExact stops before dispatch when aborted',async()=>{
 
 async function missionHarness(status='terminated',trajectoryCoverage=null,{webglAvailable=true,workerAvailable=false,stellarAvailable=false,performanceStep=0,initialServer={tick:1}}={}){
   const vm=require('node:vm'),fs=require('node:fs'),units=require('../shared/units.js'),model=require('../shared/simulation.js'),visualModule=require('../orbital-visuals.js');
-  const nodes=new Map(),requests=[],frames=[],streams=[],workerMessages=[],liveRenders=[],liveTrails=[],starRenders=[],impactRenders=[],sweepRequests=[],deleteRequests=[],confirmations=[],drawImages=[],mapLabels=[],mapFills=[];
+  const nodes=new Map(),requests=[],frames=[],streams=[],workerMessages=[],liveRenders=[],liveTrails=[],starRenders=[],impactRenders=[],sweepRequests=[],deleteRequests=[],confirmations=[],drawImages=[],mapLabels=[],mapFills=[],pageEvents={},stopped={frames:[],workers:0,stellar:0};
   const context2d=new Proxy({
     createRadialGradient:()=>({addColorStop(){}}),
     drawImage:(...args)=>drawImages.push(args),
@@ -140,7 +140,7 @@ async function missionHarness(status='terminated',trajectoryCoverage=null,{webgl
   const satellite={id:'one',name:'卫星',massKg:1000,initial:{speed:0},status,state:{tick:240001,elapsedSeconds:1000.001,x:500,y:0,vx:0,vy:1},...(trajectoryCoverage?{trajectoryCoverage}:{})};
   node('exportJson').dataset.export='json';
   const reply=data=>({ok:true,json:async()=>data});
-  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalHistoryGL,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},star(_ctx,point,appearance,body){starRenders.push({point,appearance,body});},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(_ctx,impactView,age,mass,angle){impactRenders.push({impactView,age,mass,angle});},mapImpact(){}}),satelliteAppearance:()=>({opacity:0,radius:0}),stellarAppearance:(scale,body)=>({radius:body.collisionRadius*scale,markerRadius:3}),blackHoleAppearance:visualModule.blackHoleAppearance},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},confirm:text=>{confirmations.push(text);return true;},performance:{now:()=>performanceNow},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},...(workerAvailable?{Worker:class{postMessage(message){workerMessages.push(message);}}}:{}),devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),setTimeout:fn=>{if(workerAvailable)fn();return 0;},clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){}},fetch:async(path,options)=>{
+  const sandbox={OrbitalSweep:require('../shared/map-sweep.js'),OrbitalHistory:history,OrbitalHistoryGL,OrbitalUnits:units,OrbitalModel:model,OrbitalCamera:require('../camera.js'),OrbitalVisuals:{create:()=>({blackhole(){},star(_ctx,point,appearance,body){starRenders.push({point,appearance,body});},trail(_ctx,points){liveRenders.push(points.at(-1));liveTrails.push(points);},satellite(){},impact(_ctx,impactView,age,mass,angle){impactRenders.push({impactView,age,mass,angle});},mapImpact(){}}),satelliteVisualMass:visualModule.satelliteVisualMass,satelliteAppearance:()=>({opacity:0,radius:0}),stellarAppearance:(scale,body)=>({radius:body.collisionRadius*scale,markerRadius:3}),blackHoleAppearance:visualModule.blackHoleAppearance},document:{getElementById:node,createElement:tag=>node('created-'+nodes.size+'-'+tag),querySelectorAll:selector=>selector==='[data-export]'?[node('exportJson')]:[],hidden:false},confirm:text=>{confirmations.push(text);return true;},performance:{now:()=>performanceNow},matchMedia:()=>({matches:false}),ResizeObserver:class{constructor(callback){this.callback=callback;}observe(){this.callback();}},...(workerAvailable?{Worker:class{postMessage(message){workerMessages.push(message);}terminate(){stopped.workers++;}}}:{}),devicePixelRatio:1,requestAnimationFrame:fn=>frames.push(fn),cancelAnimationFrame:id=>stopped.frames.push(id),addEventListener:(type,handler)=>{pageEvents[type]=handler;},setTimeout:fn=>{if(workerAvailable)fn();return 0;},clearTimeout(){},URLSearchParams,AbortController,DOMException,EventSource:class{constructor(){streams.push(this);}addEventListener(type,handler){this[type]=handler;}close(){this.closed=true;}},fetch:async(path,options)=>{
     if(path.includes('/trajectory?'))return new Promise(resolve=>requests.push({path,options,resolve:data=>resolve(reply(data))}));
     if(path==='/api/session/guest')return reply({user:{id:'user'},csrfToken:'token'});
     if(path==='/api/model')return reply({model:model.MODEL,server:initialServer});
@@ -152,11 +152,11 @@ async function missionHarness(status='terminated',trajectoryCoverage=null,{webgl
     return reply({satellite});
   }};
   sandbox.performance.now=()=>{const now=performanceNow;performanceNow+=performanceStep;return now;};
-  sandbox.OrbitalStellar={createRenderer:canvas=>{stellar.canvas=canvas;return {available:stellarAvailable,render(input){stellar.frames.push(input);return stellarAvailable;},destroy(){}};}};
+  sandbox.OrbitalStellar={createRenderer:canvas=>{stellar.canvas=canvas;return {available:stellarAvailable,render(input){stellar.frames.push(input);return stellarAvailable;},destroy(){stopped.stellar++;}};}};
   vm.runInNewContext(fs.readFileSync(require.resolve('../mission.js'),'utf8'),sandbox);
   const flush=()=>new Promise(resolve=>setImmediate(resolve));await flush();
   await node('satellites').children[0].onclick();
-  return {node,requests,flush,frames,streams,workerMessages,setPerformanceNow:value=>{performanceNow=value;},satellite,liveRenders,liveTrails,starRenders,impactRenders,sweepRequests,deleteRequests,confirmations,drawImages,mapLabels,mapFills,exact,stellar};
+  return {node,requests,flush,frames,streams,workerMessages,setPerformanceNow:value=>{performanceNow=value;},satellite,liveRenders,liveTrails,starRenders,impactRenders,sweepRequests,deleteRequests,confirmations,drawImages,mapLabels,mapFills,exact,stellar,pageEvents,stopped};
 }
 
 function windowPoints(from,to){return [{seq:from+1,tick:from*240,elapsedSeconds:from,x:500,y:0,vx:0,vy:1},{seq:to+1,tick:to*240,elapsedSeconds:to,x:500,y:1,vx:0,vy:1}];}
@@ -270,6 +270,21 @@ test('subpixel stars retain their individual colors on the full map without name
   for(const {star} of bodies)assert.ok(h.mapFills.includes(star.color),star.color);
   assert.ok(h.mapLabels.every(label=>bodies.every(body=>body.star.name!==label.name)));
   assert.ok(h.node('stellarFocus').children.every(option=>/^恒星 \d+$/.test(option.textContent)));
+});
+
+test('leaving 2D for another page releases its rendering, prediction and realtime connection',async()=>{
+  const h=await missionHarness('active',null,{workerAvailable:true,stellarAvailable:true});
+  h.frames[0](16);
+  const lastFrame=h.frames.at(-1),frameCount=h.frames.length,drawCount=h.stellar.frames.length;
+  h.pageEvents.pagehide({persisted:true});
+  assert.deepEqual(h.stopped.frames,[frameCount]);
+  assert.equal(h.stopped.workers,1);
+  assert.equal(h.stopped.stellar,1);
+  assert.equal(h.exact.destroyCount,1);
+  assert.equal(h.streams.at(-1).closed,true);
+  lastFrame(32);
+  assert.equal(h.stellar.frames.length,drawCount);
+  assert.equal(h.frames.length,frameCount);
 });
 
 test('stellar close-up and its surface share one world phase even when drawing takes time',async()=>{

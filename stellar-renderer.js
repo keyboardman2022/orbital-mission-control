@@ -6,7 +6,15 @@ const OrbitalStellar=(()=>{
     giant:[[1,.29,.075],2],ivory:[[.78,.86,1],1],cinder:[[1,.24,.055],2],
     sapphire:[[.37,.59,1],1],helios:[[1,.72,.32],0],colossus:[[1,.18,.055],2]
   };
-  function profile(id){const [color,kind]=profiles[id]||profiles.aurora;return {color:[...color],kind};}
+  function profile(id,tint){
+    if(!profiles[id]&&/^#[\da-f]{6}$/i.test(tint)){
+      const rgb=Number.parseInt(tint.slice(1),16);
+      const color=[rgb>>16,(rgb>>8)&255,rgb&255].map(channel=>channel/255);
+      return {color,kind:color[2]>color[0]?1:0};
+    }
+    const [color,kind]=profiles[id]||profiles.aurora;
+    return {color:[...color],kind};
+  }
   const vertex='attribute vec2 position;void main(){gl_Position=vec4(position,0.,1.);}';
   const fragment=`precision highp float;
 uniform vec2 center;uniform float radius;uniform float time;uniform vec3 base;uniform float kind;uniform float opacity;
@@ -88,7 +96,7 @@ void main(){
             const edge=radius*2.8,left=Math.max(0,Math.floor((x-edge)*dpr)),right=Math.min(w,Math.ceil((x+edge)*dpr));
             const bottom=Math.max(0,Math.floor((height-y-edge)*dpr)),top=Math.min(h,Math.ceil((height-y+edge)*dpr));
             if(right<=left||top<=bottom)continue;
-            gl.scissor(left,bottom,right-left,top-bottom);const appearance=profile(body.star?.id);
+            gl.scissor(left,bottom,right-left,top-bottom);const appearance=profile(body.star?.id,body.star?.color);
             gl.uniform2f(uniforms.center,x*dpr,(height-y)*dpr);gl.uniform1f(uniforms.radius,radius*dpr);gl.uniform1f(uniforms.opacity,opacity);
             gl.uniform3fv(uniforms.base,appearance.color);gl.uniform1f(uniforms.kind,appearance.kind);gl.drawArrays(gl.TRIANGLES,0,6);
           }

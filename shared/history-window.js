@@ -8,6 +8,7 @@
     let lo=0,hi=points.length-1;while(lo<hi){const mid=Math.ceil((lo+hi)/2);if(points[mid].elapsedSeconds<=time)lo=mid;else hi=mid-1;}
     const a=points[lo],b=points[Math.min(lo+1,points.length-1)],fraction=b.elapsedSeconds===a.elapsedSeconds?0:(time-a.elapsedSeconds)/(b.elapsedSeconds-a.elapsedSeconds),result={elapsedSeconds:time};
     for(const key of ['x','y','vx','vy'])result[key]=a[key]+(b[key]-a[key])*fraction;
+    if(a.z!==undefined&&b.z!==undefined)for(const key of ['z','vz'])result[key]=a[key]+(b[key]-a[key])*fraction;
     return result;
   }
   function createCache(maxPoints=MAX_POINTS){return {range:null,points:[],set(range,points){if(points.length>maxPoints)throw new Error('History point bound exceeded');this.range={...range};this.points=points;},contains(time){return !!this.range&&time>=this.points[0]?.elapsedSeconds&&time<=this.points[this.points.length-1]?.elapsedSeconds;},clear(){this.range=null;this.points=[];}};}
@@ -96,6 +97,12 @@
     }
   }
   function mergeSnapshot(old,incoming){return old?{...old,...incoming}:incoming.initial?incoming:null;}
+  function samePositionAndVelocity(a,b){
+    if(a.z===undefined&&b.z===undefined){
+      return Math.hypot(a.x-b.x,a.y-b.y)<=1e-6&&Math.hypot(a.vx-b.vx,a.vy-b.vy)<=1e-6;
+    }
+    return Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z)<=1e-6&&Math.hypot(a.vx-b.vx,a.vy-b.vy,a.vz-b.vz)<=1e-6;
+  }
   // Reconstruct only short live intervals using the server's fixed-step dynamics.
   // A long offline catch-up cannot be inferred from two endpoints.
   function liveSegment(a,b,model){
@@ -103,7 +110,7 @@
     if(!Number.isSafeInteger(ticks)||ticks<=0||ticks>model.MODEL.tickRate*2)return null;
     const state={...a,status:'active',escapeRadius:a.escapeRadius||1e30,continuousTracking:true},points=[{...a}];
     for(let i=0;i<ticks;i++){model.step(state);if(state.status!=='active')return null;points.push(model.snapshot(state));}
-    if(Math.hypot(state.x-b.x,state.y-b.y)>1e-6||Math.hypot(state.vx-b.vx,state.vy-b.vy)>1e-6)return null;
+    if(!samePositionAndVelocity(state,b))return null;
     points[points.length-1]={...b};return points;
   }
   function createLiveObserver(model){
@@ -116,16 +123,16 @@
         if(state&&incoming.status==='active'&&Math.abs(incoming.tick-state.tick)<=model.MODEL.tickRate*2){
           const earlier=copy(incoming.tick<state.tick?incoming:state),later=incoming.tick<state.tick?state:incoming;
           while(earlier.tick<later.tick&&earlier.status==='active')model.step(earlier);
-          if(earlier.status===later.status&&Math.hypot(earlier.x-later.x,earlier.y-later.y)<1e-6&&Math.hypot(earlier.vx-later.vx,earlier.vy-later.vy)<1e-6)return false;
+          if(earlier.status===later.status&&samePositionAndVelocity(earlier,later))return false;
         }
         state=copy(incoming);remainder=0;return true;
       },
-      advance(seconds){
+      advance(seconds,{collect=true}={}){
         if(state?.status!=='active')return [];
         // Bound work after a suspended tab: resume smoothly rather than replay a long frame.
         remainder+=Math.min(Math.max(0,seconds),.5)*model.MODEL.tickRate;
         const steps=Math.floor(remainder+1e-9);remainder-=steps;const points=[];
-        for(let i=0;i<steps&&state.status==='active';i++){model.step(state);points.push(model.snapshot(state));}
+        for(let i=0;i<steps&&state.status==='active';i++){model.step(state);if(collect)points.push(model.snapshot(state));}
         return points;
       }
     };

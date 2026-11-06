@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ORBITAL · 3D 星图</title>
+  <link rel="stylesheet" href="map-3d.css">
+  <script src="shared/world-generator.js" defer></script>
+  <script src="shared/units.js" defer></script>
+  <script src="shared/simulation.js" defer></script>
+  <script src="shared/history-window.js" defer></script>
+  <script src="history-webgl.js" defer></script>
+  <script src="shared/map-sweep.js" defer></script>
+  <script src="camera.js" defer></script>
+  <script src="orbital-visuals.js" defer></script>
+  <script src="stellar-renderer.js" defer></script>
+  <script src="flight-controls-3d.js" defer></script>
+  <script src="map-3d.js" defer></script>
+</head>
+<body>
+  <header class="site-head">
+    <span class="brand">ORBITAL <span>/ MISSION CONTROL</span></span>
+    <nav><a id="seed-3d" href="seed-preview.html?dimension=3">生成 3D 地图</a><a id="classic-3d" href="map-3d.html" hidden>经典地图</a><a id="back-to-2d" href="mission.html">返回 2D 控制台</a></nav>
+  </header>
+  <main>
+    <div class="intro">
+      <div><p class="eyebrow">SPATIAL FLIGHT</p><h1>3D 星图</h1></div>
+      <p id="map-context" role="status">正在加载星图…</p>
+    </div>
+    <div class="layout">
+      <div class="map-column">
+      <div class="map-navigation">
+        <label>观察范围<select id="system-select" disabled></select></label>
+        <label>天体定位<select id="body-focus"><option value="">选择天体…</option></select></label>
+        <div class="controls map-tools" aria-label="星图操作">
+          <button type="button" data-map-tool="pan" aria-pressed="true">平移</button>
+          <button type="button" data-map-tool="rotate" aria-pressed="false">旋转</button>
+          <button type="button" data-map-tool="pick" aria-pressed="false">选择发射点</button>
+        </div>
+      </div>
+      <section class="stage" aria-label="可旋转的三维星图">
+        <canvas id="scene" tabindex="0" aria-label="三维星图。左键拖动平移，右键拖动或用方向键旋转，滚轮或加减键缩放"></canvas>
+        <div class="stage-caption"><span class="dot"></span><span id="stage-label">星系近景</span></div>
+        <p id="stage-flight" class="stage-flight" role="status" hidden></p>
+        <p id="stage-wave" class="stage-wave" hidden></p>
+        <div class="stage-help" id="map-hint">左键平移 · 右键旋转 · 滚轮缩放</div>
+        <p class="stage-scale" id="map-scale"></p>
+      </section>
+      </div>
+      <div class="side-column">
+      <aside class="panel" aria-label="发射与视角控制">
+        <p class="eyebrow">LAUNCH CONFIGURATION</p>
+        <form id="launch-form">
+          <label>卫星名称<input name="name" maxlength="64" placeholder="可留空"></label>
+          <div class="coordinates">
+            <label>X（km）<input name="x" type="number" step="any" required></label>
+            <label>Y（km）<input name="y" type="number" step="any" required></label>
+            <label>Z（km）<input name="z" type="number" step="any" required></label>
+          </div>
+          <div class="form-pair">
+            <label>质量（kg）<input name="mass" type="number" step="any" value="1000" required></label>
+            <label>速度（km/s）<input name="speed" type="number" step="any" value="45000" required></label>
+            <label>方位角（°）<input name="direction" type="number" step="any" value="90" required></label>
+            <label>俯仰角（°）<input name="pitch" type="number" min="-90" max="90" step="any" value="30" required></label>
+          </div>
+          <p class="note">Z 为相对地图原点的高度，正俯仰角朝 +Z。方位角从 +X 朝 +Y 增加。</p>
+          <div class="controls">
+            <button type="button" data-preset="infall">掠入</button>
+            <button type="button" data-preset="orbit">环绕</button>
+            <button type="button" data-preset="escape">逃逸</button>
+          </div>
+          <p id="speed-reference" class="note"></p>
+          <label class="check"><input id="predict-3d" type="checkbox"> 显示预测位置点</label>
+          <p id="validation-3d" class="note" role="status"></p>
+          <button id="launch-3d" type="submit" disabled>发射卫星</button>
+          <p id="launch-status" class="note" role="status">正在连接计算服务…</p>
+          <button id="reconnect-3d" type="button" hidden>重新连接</button>
+        </form>
+        <div class="section-divider"></div>
+        <p class="eyebrow">VIEW CONTROL</p>
+        <button id="locate-launch" type="button">定位发射点</button>
+        <label>相机俯角 <output id="pitch-value">41°</output><input id="pitch" type="range" min="-180" max="180" value="41"></label>
+        <label>缩放 <output id="zoom-value">—</output><input id="zoom" type="range" min="0" max="1000" step="1" value="0"></label>
+        <label class="check"><input id="auto-fit" type="checkbox"> 自动扩展视野</label>
+        <div class="controls"><button id="play" type="button">暂停画面</button><button id="reset" type="button">重置视角</button></div>
+      </aside>
+      </div>
+      <section class="panel records" aria-label="卫星档案">
+          <p class="eyebrow">FLIGHT RECORDS</p>
+          <h2>卫星档案</h2>
+          <p class="note" id="view-status" role="status">实时观察</p>
+          <div class="controls">
+            <button id="hide-flights" type="button">隐藏卫星</button>
+            <button id="show-flights" type="button">显示卫星</button>
+            <button id="sweep-3d" type="button" disabled>全图冲击波</button>
+            <button id="refresh-flights" type="button" disabled>刷新列表</button>
+          </div>
+          <label>我的 3D 卫星<select id="satellite-select"><option value="">选择卫星</option></select></label>
+          <button id="more-flights" type="button" hidden>加载更多卫星</button>
+          <div id="flight-detail" class="telemetry" hidden>
+            <h3 id="flight-name"></h3>
+            <dl><div><dt>状态</dt><dd id="flight-state">—</dd></div><div><dt>Z（km）</dt><dd id="height-value">—</dd></div></dl>
+            <p id="flight-meta" class="note"></p>
+            <p id="flight-speed" class="note"></p>
+            <div class="controls"><button id="follow-flight" type="button" aria-pressed="false" disabled>跟踪所选卫星</button><button id="locate-flight" type="button">定位所选卫星</button></div>
+            <div class="controls"><button id="terminate-3d" type="button">终止追踪</button><button id="delete-3d" type="button">永久删除档案</button></div>
+            <div class="controls"><button id="history-3d" type="button">加载历史回放</button><button type="button" data-export="json">导出 JSON</button><button type="button" data-export="csv">导出 CSV</button></div>
+            <div id="replay-3d" hidden>
+              <label>回放进度 <output id="replay-time"></output><input id="timeline-3d" type="range" min="0" max="0" step="any"></label>
+              <label>播放速度<select id="replay-rate"><option value=".25">0.25×</option><option value="1" selected>1×</option><option value="4">4×</option><option value="16">16×</option></select></label>
+              <div class="controls"><button id="replay-play" type="button">播放</button><button id="return-live" type="button">返回实时</button></div>
+              <p id="history-status" class="note" role="status"></p>
+            </div>
+            <p id="export-status" class="note" role="status"></p>
+            <a id="download-export-3d" hidden>下载导出文件</a>
+          </div>
+          <p class="note" id="records-status" role="status"></p>
+      </section>
+      <section class="panel identity" aria-label="访客档案与物理模型">
+        <p class="eyebrow">IDENTITY &amp; MODEL</p>
+        <h2>访客档案</h2>
+        <p id="identity-3d" class="note">正在连接…</p>
+        <details id="recovery-3d" hidden>
+          <summary>保存访客档案恢复密钥</summary>
+          <code id="recovery-key-3d"></code>
+          <div class="controls"><button id="copy-key-3d" type="button">复制密钥</button><button id="save-key-3d" type="button">下载密钥</button><button id="dismiss-key-3d" type="button">隐藏密钥</button></div>
+        </details>
+        <form id="recover-form-3d">
+          <label>恢复密钥<input id="recover-key-3d" type="password" autocomplete="off" required></label>
+          <button id="restore-3d" type="submit">恢复档案</button>
+        </form>
+        <div class="controls"><button id="rotate-key-3d" type="button" disabled>轮换恢复密钥</button><button id="logout-3d" type="button" disabled>退出当前档案</button></div>
+        <p class="note" id="identity-status" role="status"></p>
+        <div class="section-divider"></div>
+        <h2>物理与观察范围</h2>
+        <p class="note" id="observation-3d"></p>
+        <p class="note">黑洞引力计算计入卫星质量，恒星和行星的引力加速度与卫星质量无关。高速读数是模型坐标速度。</p>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

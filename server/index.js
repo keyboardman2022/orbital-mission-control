@@ -9,6 +9,7 @@ const ROOT=resolve(__dirname,'..');
 const HELD_LOCKS=new Set();
 const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','history-webgl.js','preview-worker.js','orbital-visuals.js','stellar-renderer.js','shared/simulation.js','shared/units.js','shared/history-window.js','shared/map-sweep.js']);
 for(const file of ['seed-preview.html','seed-preview.css','seed-preview.js','shared/world-generator.js'])FILES.add(file);
+for(const file of ['map-3d.html','map-3d.css','map-3d.js','flight-controls-3d.js'])FILES.add(file);
 const TYPES={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',json:'application/json; charset=utf-8',csv:'text/csv; charset=utf-8'};
 const error=(status,message)=>Object.assign(new Error(message),{status});
 function acquireLock(dataDir){
@@ -105,21 +106,23 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       if(path==='/api/stream'&&req.method==='GET'){
         if([...streams].filter(s=>s.userId===auth.userId).length>=5)throw error(429,'实时连接过多，请关闭多余页面');
         const selectedId=url.searchParams.get('satelliteId');
+        const dimension=Number(url.searchParams.get('dimension')??2);
+        if(![2,3].includes(dimension))throw error(422,'不支持的星图维度');
         if(worldId)await rpc('modelInfo',worldId);
         if(selectedId){
           const selected=await rpc('get',auth.userId,selectedId);
-          if((selected.worldId??null)!==worldId)throw error(404,'当前地图中找不到该卫星');
+          if((selected.worldId??null)!==worldId||(selected.initial.dimension??2)!==dimension)throw error(404,'当前地图中找不到该卫星');
         }
         res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});res.write('retry: 2000\n\n');
-        const stream={res,token,userId:auth.userId,worldId,selectedId,snapshot:createStreamState()};streams.add(stream);res.on('close',()=>streams.delete(stream));return;
+        const stream={res,token,userId:auth.userId,worldId,dimension,selectedId,snapshot:createStreamState()};streams.add(stream);res.on('close',()=>streams.delete(stream));return;
       }
       if(path==='/api/satellites'&&req.method==='GET')return json(res,200,await rpc('list',auth.userId,Object.fromEntries(url.searchParams)));
       if(path==='/api/satellites'&&req.method==='POST'){
         rate(req,'launch',120);return json(res,201,{satellite:await rpc('launch',auth.userId,await body(req))});
       }
-      if(path==='/api/satellites/active'&&req.method==='GET')return json(res,200,await rpc('active',auth.userId,worldId));
+      if(path==='/api/satellites/active'&&req.method==='GET')return json(res,200,await rpc('active',auth.userId,worldId,url.searchParams.get('dimension')));
       if(path==='/api/satellites/terminate-many'&&req.method==='POST'){
-        rate(req,'sweep',120);const input=await body(req);return json(res,200,await rpc('terminateMany',auth.userId,input.ids,input.worldId));
+        rate(req,'sweep',120);const input=await body(req);return json(res,200,await rpc('terminateMany',auth.userId,input.ids,input.worldId,input.dimension));
       }
       const sat=path.match(/^\/api\/satellites\/([a-f0-9-]{36})(?:\/(trajectory|terminate|exports))?$/);
       if(sat){
@@ -158,8 +161,8 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       const cache=new Map();for(const s of streams){
         try{
           await rpc('authenticate',s.token);
-          const key=s.userId+':'+(s.worldId??'');
-          if(!cache.has(key))cache.set(key,await rpc('list',s.userId,{limit:100,worldId:s.worldId}));
+          const key=s.userId+':'+(s.worldId??'')+':'+s.dimension;
+          if(!cache.has(key))cache.set(key,await rpc('list',s.userId,{limit:100,worldId:s.worldId,dimension:s.dimension}));
           let data=cache.get(key);
           if(s.selectedId&&!data.satellites.some(p=>p.id===s.selectedId))data={...data,satellites:[...data.satellites,await rpc('get',s.userId,s.selectedId)]};
           if(s.res.writableLength>1024*1024){s.res.destroy();continue;}
