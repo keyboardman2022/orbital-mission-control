@@ -19,7 +19,7 @@ parentPort.on('message',({id,method,args=[]})=>{
     let result;
     if(method==='close'){clearInterval(timer);engine.close();result={ok:true};}
     else {
-      const allowed=['modelInfo','registerWorld','guest','authenticate','recover','rotateRecovery','logout','launch','get','list','active','trajectory','terminate','terminateMany','deleteSatellite','prepareExport','getExport','finishExport','health'];
+      const allowed=['modelInfo','registerWorld','guest','authenticate','recover','rotateRecovery','logout','launch','get','list','active','trajectory','terminate','terminateMany','deleteSatellite','prepareExport','getExport','finishExport','health','setSpatialPaused'];
       if(!allowed.includes(method))throw new Error('未知内部指令');
       result=engine[method](...args);
     }

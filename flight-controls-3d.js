@@ -44,7 +44,7 @@ const OrbitalFlightControls3D = (() => {
         : '';
       $('stage-wave').hidden=!wave;
       show('stage-wave',waveStatus);
-      show('view-status',waveStatus|| (replay?'历史回放':isHidden()?'卫星已隐藏':isLivePlaying()?'实时观察':'观察已暂停 · 服务继续运行'));
+      show('view-status',waveStatus|| (replay?'历史回放':isHidden()?'卫星已隐藏':isLivePlaying()?'实时观察':'当前星图模拟已暂停'));
       if(!record)return;
       show('flight-name',record.name);
       show('flight-state',replay?'历史回放':statuses[state?.status??record.status]??record.status);
@@ -81,7 +81,7 @@ const OrbitalFlightControls3D = (() => {
         const result=await api('/api/satellites?'+query,undefined,{signal:request.signal});
         if(current!==epoch)return;
         cursor=result.nextCursor;
-        observeClock(result.server);receive(result.satellites);
+        if(observeClock(result.server))receive(result.satellites);
         note(result.satellites.length?'卫星档案已更新。':'当前地图还没有 3D 卫星。');
       }catch(error){if(current===epoch){note(error.message);if(quiet)throw error;}}
       finally{if(listRequest===request){listRequest=null;render();}}
@@ -217,7 +217,7 @@ const OrbitalFlightControls3D = (() => {
       const coverage=record.trajectoryCoverage;
       const elapsedSeconds=coverage?.endElapsedSeconds??record.state.elapsedSeconds;
       replay={id:record.id,tick:coverage?.endTick??record.state.tick,elapsedSeconds,endSeconds:elapsedSeconds,
-        birthTick:record.birthTick??0,time:0,point:null,cache:history.createCache(),overview:[],playing:false};
+        birthTick:record.birthFieldTick??record.birthTick??0,time:0,point:null,cache:history.createCache(),overview:[],playing:false};
       $('timeline-3d').max=elapsedSeconds;
       $('replay-3d').hidden=false;
       void seek(0);
@@ -316,8 +316,10 @@ const OrbitalFlightControls3D = (() => {
       try{
         const result=await api('/api/satellites/active?'+spaceQuery);
         if(sweep!==session)return;
-        leaveReplay();ensureVisible();resumeLive();
-        receive(result.satellites);
+        leaveReplay();ensureVisible();
+        if(observeClock(result.server))receive(result.satellites);
+        await resumeLive();
+        if(sweep!==session)return;
         // Include the farthest edge of the observable sphere even when starting off center.
         const extent=model.MODEL.observation.radius+Math.hypot(origin.x,origin.y,origin.z);
         session.wave=OrbitalSweep.create({ids:result.satellites.map(record=>record.id),

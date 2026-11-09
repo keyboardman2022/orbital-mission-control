@@ -16,18 +16,27 @@
   <script src="stellar-renderer.js" defer></script>
   <script src="flight-controls-3d.js" defer></script>
   <script src="map-3d.js" defer></script>
+  <link rel="stylesheet" href="mobile-map.css">
 </head>
-<body>
+<body class="spatial-page">
   <header class="site-head">
     <span class="brand">ORBITAL <span>/ MISSION CONTROL</span></span>
-    <nav><a id="seed-3d" href="seed-preview.html?dimension=3">生成 3D 地图</a><a id="classic-3d" href="map-3d.html" hidden>经典地图</a><a id="back-to-2d" href="mission.html">返回 2D 控制台</a></nav>
+    <nav>
+      <a id="seed-3d" href="seed-preview.html?dimension=3" aria-label="生成 3D 地图"><span class="wide-link-text">生成 3D 地图</span><span class="compact-link-text" aria-hidden="true">种子地图</span></a>
+      <a id="classic-3d" href="map-3d.html" hidden>经典地图</a>
+      <a id="back-to-2d" href="mission.html" aria-label="返回 2D 控制台"><span class="wide-link-text">返回 2D 控制台</span><span class="compact-link-text" aria-hidden="true">2D 星图</span></a>
+    </nav>
   </header>
+  <nav class="mobile-map-nav" aria-label="任务快捷入口">
+    <a href="#map-panel">星图</a><a href="#launch-panel">发射</a><a href="#records-panel">档案</a>
+  </nav>
   <main>
     <div class="intro">
       <div><p class="eyebrow">SPATIAL FLIGHT</p><h1>3D 星图</h1></div>
       <p id="map-context" role="status">正在加载星图…</p>
     </div>
     <div class="layout">
+      <div class="flight-workspace" id="map-panel">
       <div class="map-column">
       <div class="map-navigation">
         <label>观察范围<select id="system-select" disabled></select></label>
@@ -47,45 +56,81 @@
         <p class="stage-scale" id="map-scale"></p>
       </section>
       </div>
-      <div class="side-column">
-      <aside class="panel" aria-label="发射与视角控制">
-        <p class="eyebrow">LAUNCH CONFIGURATION</p>
+      <div class="side-column" id="launch-panel">
+      <aside class="panel launch-panel" aria-label="发射与视角控制">
+        <div class="launch-heading">
+          <h2>发射点</h2>
+          <div class="launch-heading-actions">
+            <button id="play" type="button" disabled>暂停模拟</button>
+            <button id="locate-launch" type="button">定位发射点</button>
+            <button id="launch-3d" type="submit" form="launch-form" disabled>发射卫星</button>
+          </div>
+        </div>
         <form id="launch-form">
-          <label>卫星名称<input name="name" maxlength="64" placeholder="可留空"></label>
-          <div class="coordinates">
+          <details class="launch-dial" id="launch-dial" open>
+            <summary>精确发射点 · 拨轮</summary>
+            <div class="launch-dial-reference">
+              <select id="launch-reference" aria-label="基准天体"></select>
+              <button type="button" id="launch-reference-reset">从基准起步</button>
+            </div>
+            <div class="launch-dial-modes" role="group" aria-label="拨轮调整方向">
+              <button type="button" data-launch-axis="x" aria-pressed="true">X · 远近</button>
+              <button type="button" data-launch-axis="y" aria-pressed="false">Y · 绕转</button>
+              <button type="button" data-launch-axis="z" aria-pressed="false">Z · 高度</button>
+            </div>
+            <div class="launch-dial-control">
+              <button type="button" id="launch-dial-less" aria-label="减一格">−</button>
+              <div id="launch-dial-wheel" class="launch-dial-wheel" title="向右拖动或向上滚动增加">
+                <output id="launch-dial-value" aria-label="当前拨轮读数">—</output>
+              </div>
+              <button type="button" id="launch-dial-more" aria-label="加一格">+</button>
+            </div>
+            <div class="launch-dial-actions">
+              <label><input type="checkbox" id="launch-dial-fine"> 微调</label>
+              <span id="launch-dial-step"></span>
+            </div>
+          </details>
+          <p class="note">坐标相对于基准天体</p>
+          <div class="coordinates" role="group" aria-label="相对基准天体的坐标">
             <label>X（km）<input name="x" type="number" step="any" required></label>
             <label>Y（km）<input name="y" type="number" step="any" required></label>
             <label>Z（km）<input name="z" type="number" step="any" required></label>
           </div>
-          <div class="form-pair">
-            <label>质量（kg）<input name="mass" type="number" step="any" value="1000" required></label>
+          <div class="launch-heading launch-velocity"><h2>初速度</h2></div>
+          <div class="form-pair velocity-fields">
             <label>速度（km/s）<input name="speed" type="number" step="any" value="45000" required></label>
             <label>方位角（°）<input name="direction" type="number" step="any" value="90" required></label>
             <label>俯仰角（°）<input name="pitch" type="number" min="-90" max="90" step="any" value="30" required></label>
           </div>
-          <p class="note">Z 为相对地图原点的高度，正俯仰角朝 +Z。方位角从 +X 朝 +Y 增加。</p>
           <div class="controls">
-            <button type="button" data-preset="infall">掠入</button>
-            <button type="button" data-preset="orbit">环绕</button>
-            <button type="button" data-preset="escape">逃逸</button>
+            <button type="button" data-preset="infall" aria-pressed="false">掠入</button>
+            <button type="button" data-preset="orbit" aria-pressed="false">环绕</button>
+            <button type="button" data-preset="escape" aria-pressed="false">逃逸</button>
           </div>
           <p id="speed-reference" class="note"></p>
-          <label class="check"><input id="predict-3d" type="checkbox"> 显示预测位置点</label>
+          <details class="launch-options">
+            <summary>卫星名称与质量</summary>
+            <div class="form-pair">
+              <label>卫星名称<input name="name" maxlength="64" placeholder="可留空"></label>
+              <label>质量（kg）<input name="mass" type="number" step="any" value="1000" required></label>
+            </div>
+          </details>
           <p id="validation-3d" class="note" role="status"></p>
-          <button id="launch-3d" type="submit" disabled>发射卫星</button>
+          <label class="check"><input id="predict-3d" type="checkbox"> 显示预测位置点</label>
           <p id="launch-status" class="note" role="status">正在连接计算服务…</p>
           <button id="reconnect-3d" type="button" hidden>重新连接</button>
         </form>
-        <div class="section-divider"></div>
-        <p class="eyebrow">VIEW CONTROL</p>
-        <button id="locate-launch" type="button">定位发射点</button>
+        <details class="launch-options view-options">
+        <summary>视角设置</summary>
         <label>相机俯角 <output id="pitch-value">41°</output><input id="pitch" type="range" min="-180" max="180" value="41"></label>
         <label>缩放 <output id="zoom-value">—</output><input id="zoom" type="range" min="0" max="1000" step="1" value="0"></label>
         <label class="check"><input id="auto-fit" type="checkbox"> 自动扩展视野</label>
-        <div class="controls"><button id="play" type="button">暂停画面</button><button id="reset" type="button">重置视角</button></div>
+        <div class="controls"><button id="reset" type="button">重置视角</button></div>
+        </details>
       </aside>
       </div>
-      <section class="panel records" aria-label="卫星档案">
+      </div>
+      <section class="panel records" id="records-panel" aria-label="卫星档案">
           <p class="eyebrow">FLIGHT RECORDS</p>
           <h2>卫星档案</h2>
           <p class="note" id="view-status" role="status">实时观察</p>

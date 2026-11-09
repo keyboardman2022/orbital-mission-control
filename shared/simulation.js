@@ -30,7 +30,7 @@
   ]);
   const MODEL = Object.freeze({
     version: world?'seeded-pw-2d-v1':'pw-2d-v3', mu: world?0:centralMu, rs: world?0:schwarzschildRadius, captureRadius: world?0:69.3,
-    tickRate, step: 1 / tickRate, stars,
+    tickRate, step: 1 / tickRate, stars, launchReferenceVersion:1, simulationPauseVersion:1, launchPresetVersion:1,
     dynamics: Object.freeze(world?{version:'seeded-multi-attractor-v1',maxMassKg:1e30,
       referenceFrame:'world origin; +Y up',approximation:'prescribed body orbits, PW black holes and softened Newtonian stars and planets'
     }:{version:'multi-attractor-pw-v1',legacyVersion:'two-body-pw-v1',maxMassKg:1e30,centralMassKg:units.centralMassKg,
@@ -102,22 +102,84 @@
     return (low+high)/2;
   }
   function escapeSpeed(r,mu=MODEL.mu,rs=MODEL.rs) { return Math.sqrt(2 * mu / (r - rs)); }
-  function orbitReference({x,y,z},massKg,tick=0){
+  const centralBody={id:'black-hole',name:'黑洞',kind:'blackHole',x:0,y:0,z:0,rs:MODEL.rs,mu:0};
+  function launchBodyAtTick(id,tick){
+    if(!world&&id===centralBody.id)return centralBody;
+    return stellarBodiesAtTick(tick,true).find(body=>body.id===id);
+  }
+  function resolveLaunch(input,tick){
+    const {referenceBodyId,launchPreset:mode,...launch}=input;
+    if(referenceBodyId===undefined){
+      if(mode!==undefined)fail('请选择发射预设的基准天体');
+      return input;
+    }
+    if(input.dimension!==3)fail('只有 3D 发射支持基准天体');
+    const body=launchBodyAtTick(referenceBodyId,tick);
+    if(!body)fail('当前地图中找不到发射基准天体');
+    const {x,y,z}=input.position??{};
+    if(![x,y,z].every(Number.isFinite))fail('请输入有效的相对坐标');
+    const inKm=input.unitSystem==='si-km-v1';
+    const convert=inKm?units.toKm:value=>value;
+    const position={x:convert(body.x)+x,y:convert(body.y)+y,z:convert(body.z??0)+z};
+    if(mode===undefined)return {...launch,position};
+    if(!['orbit','escape','infall'].includes(mode))fail('未知的发射预设');
+    const point=inKm?{x:units.fromKm(position.x),y:units.fromKm(position.y),z:units.fromKm(position.z)}:position;
+    const reference=orbitReference(point,input.massKg,tick,referenceBodyId);
+    const preset=launchPreset(point,reference,mode);
+    if(!preset)fail('当前发射点无法使用该预设，请调整与基准天体的距离');
+    return {...launch,position,...preset,speed:inKm?units.toKmS(preset.speed):preset.speed};
+  }
+  function orbitReference({x,y,z},massKg,tick=0,referenceBodyId){
     if(![x,y,z??0,massKg].every(Number.isFinite)||massKg<=0)return null;
     let nearest;
-    if(world){
-      for(const body of stellarBodiesAtTick(tick,z!==undefined)){
-        const radius=radiusAt(x-body.x,y-body.y,z===undefined?undefined:z-body.z);
-        if(!nearest||radius<nearest.radius)nearest={...body,radius,mu:body.mu+(body.rs?effectiveMu(massKg):0)};
-      }
-    }else nearest={name:'黑洞',x:0,y:0,z:0,rs:MODEL.rs,mu:effectiveMu(massKg),radius:radiusAt(x,y,z)};
-    if(!nearest||nearest.radius<=Math.max(1.05*nearest.rs,nearest.collisionRadius??0))return null;
+    const candidates=referenceBodyId!==undefined?[launchBodyAtTick(referenceBodyId,tick)]
+      :world?stellarBodiesAtTick(tick,z!==undefined):[centralBody];
+    for(const body of candidates){
+      if(!body)continue;
+      const radius=radiusAt(x-body.x,y-body.y,z===undefined?undefined:z-body.z);
+      if(!nearest||radius<nearest.radius)nearest={...body,radius,mu:body.mu+(body.rs?effectiveMu(massKg):0)};
+    }
+    if(!nearest||nearest.radius<=Math.max(1.05*(nearest.rs??0),nearest.collisionRadius??0))return null;
     const {radius,mu,rs}=nearest;
-    return {...nearest,circular:circularSpeed(radius,mu,rs),escape:escapeSpeed(radius,mu,rs)};
+    if(referenceBodyId!==undefined&&z!==undefined&&!rs){
+      const before=launchBodyAtTick(referenceBodyId,tick-.5),after=launchBodyAtTick(referenceBodyId,tick+.5);
+      const softenedDistance=Math.hypot(radius,nearest.softening??0);
+      return {...nearest,circular:Math.sqrt(mu)*radius/softenedDistance**1.5,escape:Math.sqrt(2*mu/softenedDistance),
+        velocity:{x:(after.x-before.x)*tickRate,y:(after.y-before.y)*tickRate,z:((after.z??0)-(before.z??0))*tickRate}};
+    }
+    return {...nearest,circular:circularSpeed(radius,mu,rs),escape:escapeSpeed(radius,mu,rs),
+      ...(referenceBodyId!==undefined&&z!==undefined?{velocity:{x:0,y:0,z:0}}:{})};
+  }
+  function spatialLaunchPreset(position,reference,mode){
+    const {radius,mu,rs=0,collisionRadius=0,softening=0,velocity}=reference;
+    const dx=position.x-reference.x,dy=position.y-reference.y,dz=position.z-(reference.z??0);
+    const horizontal=Math.hypot(dx,dy);
+    const tangentX=horizontal?-dy/horizontal:0,tangentY=horizontal?dx/horizontal:1;
+    let radialSpeed=0,tangentialSpeed=reference.circular;
+    if(mode==='orbit'&&radius<3*rs)return null;
+    if(mode==='escape'){
+      radialSpeed=1.1*reference.escape;
+      tangentialSpeed=0;
+    }
+    if(mode==='infall'){
+      // At a parabolic flyby's closest point, all speed is tangential.
+      const safeRadius=Math.max(collisionRadius,2*rs);
+      if(radius<=safeRadius)return null;
+      const periapsis=Math.min(1.1*safeRadius,(safeRadius+radius)/2);
+      const potentialDistance=rs?periapsis-rs:Math.hypot(periapsis,softening);
+      tangentialSpeed=periapsis/radius*Math.sqrt(2*mu/potentialDistance);
+      radialSpeed=-Math.sqrt(Math.max(0,reference.escape**2-tangentialSpeed**2));
+    }
+    const vx=velocity.x+radialSpeed*dx/radius+tangentialSpeed*tangentX;
+    const vy=velocity.y+radialSpeed*dy/radius+tangentialSpeed*tangentY;
+    const vz=velocity.z+radialSpeed*dz/radius;
+    return {speed:Math.hypot(vx,vy,vz),directionDeg:(Math.atan2(vy,vx)*180/Math.PI+360)%360,
+      pitchDeg:Math.atan2(vz,Math.hypot(vx,vy))*180/Math.PI};
   }
   function launchPreset(position,reference,mode){
     const distance=radiusAt(position.x,position.y,position.z);
     if(!reference||distance<MODEL.limits.minRadius||distance>MODEL.limits.maxRadius)return null;
+    if(reference.velocity)return spatialLaunchPreset(position,reference,mode);
     const speed=mode==='escape'?reference.escape*1.1:reference.circular*(mode==='infall'?.45:1);
     const radial=Math.atan2(position.y-reference.y,position.x-reference.x);
     const offset=mode==='escape'?20:mode==='infall'?150:90;
@@ -290,5 +352,5 @@
     return { tick: s.tick, elapsedSeconds: s.elapsedSeconds, x: s.x, y: s.y, vx: s.vx, vy: s.vy,...(s.z!==undefined?{z:s.z,vz:s.vz}:{}),
       kind: s.status === 'active' ? 'sample' : s.status };
   }
-  return Object.freeze({ MODEL, createRuntime:world=>createRuntime(units,generator,world), validateLaunch, createState, step, effectiveMu, acceleration, fieldAcceleration, stellarBodiesAtTick, circularSpeed, circularRadiusForPeriod, escapeSpeed, orbitReference, launchPreset, energy, angularMomentum, snapshot });
+  return Object.freeze({ MODEL, createRuntime:world=>createRuntime(units,generator,world), resolveLaunch, validateLaunch, createState, step, effectiveMu, acceleration, fieldAcceleration, stellarBodiesAtTick, circularSpeed, circularRadiusForPeriod, escapeSpeed, orbitReference, launchPreset, energy, angularMomentum, snapshot });
 });

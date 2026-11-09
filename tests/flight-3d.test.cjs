@@ -12,6 +12,58 @@ const {generateWorld,bodyPositions,worldOrbitalPlanes,SPATIAL_LAYOUT,BODY_PROFIL
 
 const flight={name:'3D probe',dimension:3,position:{x:1000,y:0,z:60},speed:40,directionDeg:90,pitchDeg:30,massKg:1000,dynamicsVersion:M.MODEL.dynamics.version,idempotencyKey:'spatial-flight-test'};
 
+test('a launch offset follows its selected star until birth and retries keep the original birth point',t=>{
+ const engine=new Engine({filename:':memory:'});
+ t.after(()=>engine.close());
+ const user=engine.guest().user.id;
+ const {worldId}=engine.registerWorld({seed:'launch reference',options:{systems:2,blackHoles:0,layout:'spatial-v2'}});
+ const {runtime}=engine.worldInfo(worldId);
+ const referenceBodyId=runtime.stellarBodiesAtTick(0,true)[0].id;
+ const position={x:450,y:-20,z:30};
+ const request={...flight,worldId,referenceBodyId,position,launchPreset:'orbit',speed:0,dynamicsVersion:runtime.MODEL.dynamics.version};
+ engine.advanceTo(1200);
+ const satellite=engine.launch(user,request);
+ const reference=runtime.stellarBodiesAtTick(satellite.birthTick,true).find(body=>body.id===referenceBodyId);
+ assert.deepEqual(satellite.initial.position,{x:reference.x+position.x,y:reference.y+position.y,z:reference.z+position.z});
+ const orbit=runtime.launchPreset(satellite.initial.position,runtime.orbitReference(satellite.initial.position,request.massKg,satellite.birthTick,referenceBodyId),'orbit');
+ assert.equal(satellite.initial.speed,orbit.speed);
+ engine.advanceTo(1320);
+ assert.deepEqual(engine.launch(user,request).initial.position,satellite.initial.position);
+ assert.throws(()=>engine.launch(user,{...request,position:{...position,z:40}}),{status:409});
+ assert.throws(()=>engine.launch(user,{...request,launchPreset:'escape'}),{status:409});
+ assert.throws(()=>engine.launch(user,{...request,referenceBodyId:'missing',idempotencyKey:'missing-reference'}),{status:422});
+});
+
+test('paused 3D launches and their stars resume from the same tick',t=>{
+ const engine=new Engine({filename:':memory:'});
+ t.after(()=>engine.close());
+ const user=engine.guest().user.id,other=engine.guest().user.id;
+ engine.advanceTo(120);
+ assert.equal(engine.setSpatialPaused(user,null,true).server.tick,120);
+ const star=M.stellarBodiesAtTick(120,true).find(body=>body.id==='ember');
+ const start={x:star.x+36,y:star.y,z:star.z};
+ const orbit=M.launchPreset(start,M.orbitReference(start,1000,120,'ember'),'orbit');
+ const request={...flight,...orbit,referenceBodyId:'ember',position:{x:36,y:0,z:0}};
+ engine.advanceTo(2400);
+ const satellite=engine.launch(user,request);
+ assert.equal(satellite.birthFieldTick,120);
+ assert.deepEqual(satellite.initial.position,start);
+ engine.advanceTo(4800);
+ assert.equal(engine.get(user,satellite.id).state.tick,0);
+ assert.equal(engine.list(user,{dimension:3}).server.tick,120);
+ assert.equal(engine.list(user).server.tick,4800);
+ assert.equal(engine.list(other,{dimension:3}).server.tick,4800);
+ assert.equal(engine.setSpatialPaused(user,null,false).server.tick,120);
+ engine.advanceTo(4801);
+ assert.equal(engine.get(user,satellite.id).state.fieldTick,121);
+ assert.equal(engine.list(user,{dimension:3}).server.tick,121);
+ engine.advanceTo(7200);
+ const {state}=engine.get(user,satellite.id);
+ const host=M.stellarBodiesAtTick(state.fieldTick,true).find(body=>body.id==='ember');
+ assert.equal(state.status,'active');
+ assert.ok(Math.hypot(state.x-host.x,state.y-host.y,state.z-host.z)<50);
+});
+
 test('3D launch presets match 2D at equal radius and aim tangent in space',()=>{
  const flat={x:1000,y:0},spatial={x:800,y:0,z:600};
  const a=M.orbitReference(flat,1000),b=M.orbitReference(spatial,1000);
@@ -23,6 +75,32 @@ test('3D launch presets match 2D at equal radius and aim tangent in space',()=>{
  assert.ok(Math.abs(state.x*state.vx+state.y*state.vy+state.z*state.vz)<1e-8);
  const escape=M.launchPreset(spatial,b,'escape');
  assert.ok(escape.pitchDeg>0);
+});
+
+test('selected-body presets compute tangency, radial escape and an inward flyby in the body frame',()=>{
+ const tick=321,star=M.stellarBodiesAtTick(tick,true).find(body=>body.id==='ember');
+ const offset={x:36,y:12,z:8};
+ const position={x:star.x+offset.x,y:star.y+offset.y,z:star.z+offset.z};
+ const reference=M.orbitReference(position,1000,tick,star.id);
+ for(const mode of ['orbit','escape','infall']){
+  const input={...flight,referenceBodyId:star.id,position:offset,launchPreset:mode,speed:0,directionDeg:0,pitchDeg:0};
+  const state=M.createState(M.resolveLaunch(input,tick),{fieldTick:tick});
+  const vx=state.vx-reference.velocity.x,vy=state.vy-reference.velocity.y,vz=state.vz-reference.velocity.z;
+  const radial=(offset.x*vx+offset.y*vy+offset.z*vz)/reference.radius;
+  const speed=Math.hypot(vx,vy,vz);
+  if(mode==='orbit'){
+   assert.ok(Math.abs(radial)<1e-8);
+   assert.ok(Math.abs(speed-reference.circular)<1e-8);
+  }else if(mode==='escape'){
+   assert.ok(radial>reference.escape);
+   assert.ok(Math.abs(radial-speed)<1e-8);
+  }else{
+   assert.ok(radial<0);
+   const periapsis=1.1*star.collisionRadius;
+   const angularMomentum=reference.radius*Math.hypot(speed*Math.sqrt(1-(radial/speed)**2));
+   assert.ok(Math.abs(angularMomentum-periapsis*Math.sqrt(2*star.mu/Math.hypot(periapsis,star.softening)))<1e-8);
+  }
+ }
 });
 
 test('3D live observation advances between packets and accepts a vertical correction',()=>{

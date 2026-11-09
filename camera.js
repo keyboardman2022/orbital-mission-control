@@ -63,6 +63,41 @@ const OrbitalCamera=(()=>{
       z:(pivot.z??0)+depth*Math.sin(to.pitch)-vertical*Math.cos(to.pitch)
     };
   }
-  return {view,toWorld,toScreen,sphereSilhouette,orbitTarget,zoomAt,pan,followAt,originMarker,minimumZoom,MAX_ZOOM,zoomFromSlider,zoomToSlider,wheelZoom};
+  function createPinchGesture({start,zoom}){
+    const touches=new Map();
+    let pinching=false;
+    function measure(){
+      const [first,second]=touches.values();
+      if(!second)return null;
+      return {distance:Math.hypot(first.x-second.x,first.y-second.y),
+        clientX:(first.x+second.x)/2,clientY:(first.y+second.y)/2};
+    }
+    function remember(event){touches.set(event.pointerId,{x:event.clientX,y:event.clientY});}
+    return {
+      down(event){
+        if(event.pointerType!=='touch')return false;
+        remember(event);
+        if(!pinching&&touches.size===2){pinching=true;start();}
+        return pinching;
+      },
+      move(event){
+        if(!touches.has(event.pointerId))return false;
+        const before=measure();
+        remember(event);
+        const after=measure();
+        if(before?.distance&&after?.distance&&before.distance!==after.distance){
+          zoom(after.distance/before.distance,after);
+        }
+        return pinching;
+      },
+      end(event){
+        if(!touches.delete(event.pointerId))return false;
+        const consumed=pinching;
+        if(!touches.size)pinching=false;
+        return consumed;
+      }
+    };
+  }
+  return {view,toWorld,toScreen,sphereSilhouette,orbitTarget,zoomAt,pan,followAt,originMarker,minimumZoom,MAX_ZOOM,zoomFromSlider,zoomToSlider,wheelZoom,createPinchGesture};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalCamera;

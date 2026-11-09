@@ -1,0 +1,75 @@
+.mobile-map-nav, .compact-link-text { display: none; }
+
+@media (max-width: 760px) {
+  .mission-page, .spatial-page { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+
+  .mobile-map-nav {
+    position: fixed;
+    z-index: 5;
+    inset: auto 0 0;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    padding: 5px 10px calc(5px + env(safe-area-inset-bottom));
+    background: var(--bg);
+    border-top: 1px solid var(--line);
+  }
+  .mobile-map-nav a {
+    display: grid;
+    min-height: 48px;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 650;
+    text-decoration: none;
+  }
+  .mobile-map-nav a:first-child { color: var(--cyan, var(--green)); }
+  #map-panel, #launch-panel, #records-panel { scroll-margin-top: 8px; }
+
+  .mission-page .workspace { display: contents; }
+  .mission-page .space {
+    grid-row: 1;
+    height: clamp(380px, calc(100svh - 166px), 760px);
+    min-height: 0;
+  }
+  .mission-page aside { grid-row: 2; }
+  .mission-page .records { grid-row: 3; }
+  .mission-page footer { grid-row: 4; }
+  .mission-page header { gap: 4px 10px; padding: 6px 12px; }
+  .mission-page header a { display: inline-flex; align-items: center; min-height: 44px; }
+  .mission-page .map-legend, .mission-page .map-head > div { display: none; }
+  .mission-page .map-head { top: 12px; left: 12px; right: 12px; justify-content: flex-end; }
+  .mission-page .map-tools { top: 38px; left: 12px; right: 12px; }
+  .mission-page .map-tools button { min-height: 44px; }
+  .mission-page #offscreen { top: 115px; bottom: auto; left: 12px; max-width: calc(100% - 24px); }
+  .mission-page .map-actions { left: 12px; right: 12px; max-width: none; bottom: 58px; gap: 5px; }
+  .mission-page .map-actions .check, .mission-page .stellar-focus select { min-height: 40px; }
+  .mission-page .map-bottom { bottom: 8px; left: 12px; right: 12px; gap: 6px; }
+  .mission-page .map-bottom label { flex: 0 0 auto; }
+  .mission-page .map-bottom input { width: clamp(72px, 24vw, 150px); height: 40px; }
+  .mission-page #coordinateReadout { min-width: 0; overflow-wrap: anywhere; }
+  .mission-page #zoomValue { min-width: 42px; }
+
+  .spatial-page .site-head { padding: 5px 12px; }
+  .spatial-page .site-head nav { gap: 0 12px; }
+  .spatial-page .site-head nav a:not([hidden]) { display: inline-flex; align-items: center; min-height: 44px; }
+  .spatial-page main { padding: 8px 10px 20px; }
+  .spatial-page .intro { flex-direction: row; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .spatial-page .intro .eyebrow { display: none; }
+  .spatial-page .intro h1 { font-size: 24px; white-space: nowrap; }
+  .spatial-page #map-context { min-width: 0; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+  .spatial-page .map-navigation label { gap: 0; font-size: 0; }
+  .spatial-page .map-navigation select { font-size: 13px; }
+  .spatial-page .map-navigation button, .spatial-page .map-navigation select { min-height: 44px; }
+  .spatial-page .stage { min-height: clamp(280px, calc(100svh - 275px), 700px); }
+}
+
+@media (max-width: 380px) {
+  .spatial-page .site-head nav { gap: 0 8px; }
+  .spatial-page .site-head nav a { white-space: nowrap; }
+  .spatial-page .wide-link-text { display: none; }
+  .spatial-page .compact-link-text { display: inline; }
+}

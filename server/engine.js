@@ -10,6 +10,7 @@ const {initializeStore,readPoints,archiveBatch,archivePath}=require('./trajector
 const {statSync,unlinkSync}=require('node:fs');
 const hash=value=>createHash('sha256').update(String(value)).digest('hex');
 const secret=()=>randomBytes(32).toString('base64url');
+const spatialClockKey=(userId,worldId)=>`spatial-clock:${userId}:${worldId??''}`;
 function fail(status,message){throw Object.assign(new Error(message),{status});}
 function integer(value,fallback,min=0,max=Number.MAX_SAFE_INTEGER){
   if(value===undefined||value===null||value==='')return fallback;
@@ -50,6 +51,8 @@ class Engine{
     const clock=meta.get('clock');
     const saved=clock?JSON.parse(clock.value):{tick:0};
     this.tick=saved.tick;this.realtimeRemainder=0;this.lastGoodWallMs=saved.savedWallMs??this.now();this.clockError=this.now()<this.lastGoodWallMs-1000?'系统时钟早于最近保存时刻，请校准后重启':null;
+    this.spatialClocks=new Map(this.db.prepare("SELECT key,value FROM meta WHERE key LIKE 'spatial-clock:%'").all()
+      .map(({key,value})=>[key,JSON.parse(value)]));
     this.records=new Map();this.dirty=new Set();this.pending=[];this.pendingEvents=[];
     for(const row of this.db.prepare('SELECT record FROM satellites').iterate()){
       const r=JSON.parse(row.record);if(r.status==='active'||r.status==='queued'){
@@ -102,6 +105,28 @@ class Engine{
     if(!this.diskCheckedAt||performance.now()-this.diskCheckedAt>1000){this.diskCheckedAt=performance.now();const size=path=>{try{return statSync(path).size;}catch{return 0;}};this.diskMetrics={databaseBytes:size(this.filename),walBytes:size(this.filename+'-wal')};}
     return {tick:this.tick,lagSeconds:0,status:this.clockError?'clock_error':'running',clockMode:'runtime-only-v1',active:this.records.size,clockError:this.clockError,storage:{...this.metrics,...this.diskMetrics,bufferedStates:[...this.samplers.values()].reduce((sum,s)=>sum+s.size-1,0),pendingPoints:this.pending.length}};
   }
+  spatialTick(clock){return (clock?.pausedAt??this.tick)-(clock?.offset??0);}
+  viewClock(userId,worldId,dimension){
+    const server=this.health();
+    if(dimension!==3)return server;
+    const clock=this.spatialClocks.get(spatialClockKey(userId,worldId));
+    return {...server,tick:this.spatialTick(clock),paused:clock?.pausedAt!=null,pauseRevision:clock?.revision??0};
+  }
+  setSpatialPaused(userId,worldId,paused){
+    this.worldInfo(worldId);
+    if(typeof paused!=='boolean')fail(422,'请选择暂停或继续模拟');
+    if(this.clockError)fail(503,'服务器时钟异常，暂不能切换模拟状态');
+    const key=spatialClockKey(userId,worldId);
+    const clock=this.spatialClocks.get(key)??{offset:0,pausedAt:null,revision:0};
+    if(paused!==(clock.pausedAt!==null)){
+      const next={offset:paused?clock.offset:clock.offset+this.tick-clock.pausedAt,
+        pausedAt:paused?this.tick:null,revision:clock.revision+1};
+      this.checkpoint();
+      this.sql.clock.run(key,JSON.stringify(next));
+      this.spatialClocks.set(key,next);
+    }
+    return this.active(userId,worldId,3);
+  }
   session(userId){
     const token=secret(),csrfToken=secret();
     this.db.prepare('INSERT INTO sessions VALUES (?,?,?,?)').run(hash(token),userId,csrfToken,this.now()+30*86400000);
@@ -135,11 +160,20 @@ class Engine{
   get(userId,id){return this.publicRecord(this.owned(userId,id));}
   launch(userId,input){
     const {worldId,runtime}=this.worldInfo(input.worldId);
-    const initial=runtime.validateLaunch(input),idem=input.idempotencyKey;
+    const idem=input.idempotencyKey,relative=input.referenceBodyId!==undefined||input.launchPreset!==undefined;
+    let initial=relative?null:runtime.validateLaunch(input);
     if(typeof idem!=='string'||idem.length<8||idem.length>128)fail(422,'发射请求缺少有效幂等键');
-    const requestHash=hash(JSON.stringify(worldId?{...initial,worldId}:initial));
+    // A retry is tied to the submitted offset, even if the reference has moved since birth.
+    const request=relative?[worldId,input.referenceBodyId,input.position?.x,input.position?.y,input.position?.z,
+      input.name,input.dimension,input.massKg,input.speed,input.directionDeg,input.pitchDeg,
+      input.unitSystem,input.calibrationVersion,input.modelVersion,input.dynamicsVersion,
+      ...(input.launchPreset===undefined?[]:[input.launchPreset])]
+      :worldId?{...initial,worldId}:initial;
+    const requestHash=hash(JSON.stringify(request));
     const old=this.db.prepare('SELECT * FROM satellites WHERE user_id=? AND idem=?').get(userId,idem);
     if(old){if(old.request_hash!==requestHash)fail(409,'同一发射请求不能更换参数');return this.get(userId,old.id);}
+    const fieldTick=input.dimension===3?this.spatialTick(this.spatialClocks.get(spatialClockKey(userId,worldId))):this.tick;
+    initial??=runtime.validateLaunch(runtime.resolveLaunch(input,fieldTick));
     if(initial.dynamicsVersion!==runtime.MODEL.dynamics.version)fail(409,'新发射必须使用当前多引力源动力学版本，请刷新页面');
     if(this.clockError)fail(503,'服务器时钟异常，暂不能发射');
     if(this.records.size>=this.maxActive)fail(503,'当前并发计算容量已满，请稍后发射；已有卫星继续运行');
@@ -147,7 +181,7 @@ class Engine{
     this.checkpoint();
     const id=randomUUID(),createdMs=Math.floor(this.now()),nameGenerated=!initial.name;
     if(nameGenerated)initial.name='SAT-'+hash(`${createdMs}:${id}`).slice(0,16);
-    const r={id,ownerId:userId,name:initial.name,massKg:initial.massKg,initial,sampling:{...this.samplingPolicy,legacyThroughSeq:0},trajectoryBudget:{...this.trajectoryPolicy,status:'recording',cappedAt:null},...(nameGenerated?{nameGenerated:true,nameTimestampMs:createdMs}:{}),...(worldId?{worldId}:{}),status:'active',birthTick:this.tick,state:runtime.createState(initial,{continuousTracking:true,fieldTick:this.tick}),createdAt:new Date(createdMs).toISOString(),endReason:null,seq:0,eventSeq:0,lastSample:null};
+    const r={id,ownerId:userId,name:initial.name,massKg:initial.massKg,initial,sampling:{...this.samplingPolicy,legacyThroughSeq:0},trajectoryBudget:{...this.trajectoryPolicy,status:'recording',cappedAt:null},...(nameGenerated?{nameGenerated:true,nameTimestampMs:createdMs}:{}),...(worldId?{worldId}:{}),status:'active',birthTick:this.tick,...(fieldTick!==this.tick?{birthFieldTick:fieldTick}:{}),state:runtime.createState(initial,{continuousTracking:true,fieldTick}),createdAt:new Date(createdMs).toISOString(),endReason:null,seq:0,eventSeq:0,lastSample:null};
     this.transaction(()=>{
       r.lastSample={...M.snapshot(r.state),kind:'birth'};Budget.admit(r,r.lastSample);r.eventSeq=1;
       this.db.prepare('INSERT INTO satellites VALUES (?,?,?,?,?,?)').run(id,userId,this.now(),idem,requestHash,JSON.stringify(r));
@@ -209,7 +243,8 @@ class Engine{
     if(this.clockError)return;
     const started=performance.now();let steps=0;
     while(this.tick<target&&steps<maxSteps&&performance.now()-started<budgetMs){
-      const active=[...this.records.values()].filter(r=>r.status==='active');
+      const active=[...this.records.values()].filter(r=>r.status==='active'&&
+        (r.initial.dimension!==3||this.spatialClocks.get(spatialClockKey(r.ownerId,r.worldId))?.pausedAt==null));
       if(!active.length){this.tick=target;break;}
       for(const r of active){
         const sampler=this.ensureSampler(r);(this.recordRuntimes.get(r)??M).step(r.state);this.metrics.rawSteps++;if(sampler)sampler.push(M.snapshot(r.state));this.dirty.add(r.id);
@@ -239,12 +274,12 @@ class Engine{
     const rows=this.db.prepare(`SELECT s.rowid AS cursor,s.id,s.record FROM satellites s
       LEFT JOIN satellite_worlds sw ON sw.satellite_id=s.id
       WHERE s.user_id=? AND s.rowid<? AND sw.world_id IS ? AND COALESCE(json_extract(s.record,'$.initial.dimension'),2)=? ORDER BY s.rowid DESC LIMIT ?`).all(userId,after,worldId??null,space,count+1);
-    return {satellites:rows.slice(0,count).map(row=>this.publicRecord(this.records.get(row.id)||JSON.parse(row.record))),nextCursor:rows.length>count?rows[count-1].cursor:null,server:this.health()};
+    return {satellites:rows.slice(0,count).map(row=>this.publicRecord(this.records.get(row.id)||JSON.parse(row.record))),nextCursor:rows.length>count?rows[count-1].cursor:null,server:this.viewClock(userId,worldId,space)};
   }
   active(userId,worldId,dimension){
     this.worldInfo(worldId);
     const space=integer(dimension,2,2,3);
-    return {satellites:[...this.records.values()].filter(r=>r.ownerId===userId&&(r.worldId??null)===(worldId??null)&&(r.initial.dimension??2)===space&&['active','queued'].includes(r.status)).map(r=>this.publicRecord(r)),server:this.health()};
+    return {satellites:[...this.records.values()].filter(r=>r.ownerId===userId&&(r.worldId??null)===(worldId??null)&&(r.initial.dimension??2)===space&&['active','queued'].includes(r.status)).map(r=>this.publicRecord(r)),server:this.viewClock(userId,worldId,space)};
   }
   trajectory(userId,id,query={}){
     const r=this.owned(userId,id);if(query.cutoffSeq===undefined)this.checkpoint();

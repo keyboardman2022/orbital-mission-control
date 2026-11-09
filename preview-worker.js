@@ -7,7 +7,8 @@ self.onmessage = ({data}) => {
       model=data.world?OrbitalModel.createRuntime(data.world):OrbitalModel;
       cachedWorldId=data.worldId;
     }
-    const checked=model.validateLaunch(data.input), initial=checked.normalized||checked.value||checked;
+    const input=model.resolveLaunch(data.input,data.fieldTick);
+    const checked=model.validateLaunch(input), initial=checked.normalized||checked.value||checked;
     let state=model.createState(initial,{continuousTracking:true,fieldTick:data.fieldTick});
     const point=()=>({x:state.x,y:state.y,...(state.z!==undefined?{z:state.z}:{})});
     const points=[point()];

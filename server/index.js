@@ -9,7 +9,7 @@ const ROOT=resolve(__dirname,'..');
 const HELD_LOCKS=new Set();
 const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','history-webgl.js','preview-worker.js','orbital-visuals.js','stellar-renderer.js','shared/simulation.js','shared/units.js','shared/history-window.js','shared/map-sweep.js']);
 for(const file of ['seed-preview.html','seed-preview.css','seed-preview.js','shared/world-generator.js'])FILES.add(file);
-for(const file of ['map-3d.html','map-3d.css','map-3d.js','flight-controls-3d.js'])FILES.add(file);
+for(const file of ['map-3d.html','map-3d.css','map-3d.js','flight-controls-3d.js','mobile-map.css'])FILES.add(file);
 const TYPES={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',json:'application/json; charset=utf-8',csv:'text/csv; charset=utf-8'};
 const error=(status,message)=>Object.assign(new Error(message),{status});
 function acquireLock(dataDir){
@@ -103,6 +103,11 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       }
       if(path==='/api/session/recovery-key'&&req.method==='POST'){rate(req,'recovery',10);await body(req);return json(res,200,await rpc('rotateRecovery',auth.userId));}
       if(path==='/api/session'&&req.method==='DELETE'){await rpc('logout',token);cookie(res,'',true);for(const s of streams)if(s.token===token)s.res.end();return json(res,200,{ok:true});}
+      if(path==='/api/simulation/pause'&&req.method==='POST'){
+        rate(req,'simulation-pause',120);
+        const input=await body(req);
+        return json(res,200,await rpc('setSpatialPaused',auth.userId,worldId,input.paused));
+      }
       if(path==='/api/stream'&&req.method==='GET'){
         if([...streams].filter(s=>s.userId===auth.userId).length>=5)throw error(429,'实时连接过多，请关闭多余页面');
         const selectedId=url.searchParams.get('satelliteId');

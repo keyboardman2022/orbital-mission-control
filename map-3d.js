@@ -12,7 +12,7 @@
     $('classic-3d').hidden=false;
   }
   let config, csrfToken='', stream, worker, previewTimer, previewToken=0, pendingLaunch;
-  let connecting=false, sending=false, pageActive=true, online=false, userId='', identityBusy=false;
+  let connecting=false, sending=false, switchingPause=false, pageActive=true, online=false, userId='', identityBusy=false;
   async function api(path,body,{method=body===undefined?'GET':'POST',signal}={}){
     const response=await fetch(path,{
       method,signal,
@@ -104,18 +104,22 @@
   const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
   let playing = true, frame = null, lastFrame = null, drag = null;
   let serverTick=config.server?.tick??0, tickSeen=performance.now(), frozenTick=serverTick;
+  let pauseRevision=-1;
   let frozenFlights=new Map();
-  const currentTick=()=>serverTick+Math.max(0,performance.now()-tickSeen)/1000*model.MODEL.tickRate;
+  const currentTick=()=>playing?serverTick+Math.max(0,performance.now()-tickSeen)/1000*model.MODEL.tickRate:frozenTick;
   const activeScope=()=>selected??{x:0,y:0,extent:world.radius};
   const observed=id=>playing?satellites.get(id)?.observer.state:frozenFlights.get(id);
   const flightState=()=>controls.replay?controls.replay.point:observed(selectedFlight);
   const fieldTick=()=>controls.replay
     ? controls.replay.birthTick+controls.replay.time*model.MODEL.tickRate
-    : playing?currentTick():frozenTick;
+    : currentTick();
   const bodiesAt=tick=>config.world?model.stellarBodiesAtTick(tick,true):[classicHole,...model.stellarBodiesAtTick(tick,true)];
   const labels={star:'恒星',planet:'行星',moon:'天然卫星',blackHole:'黑洞','black-hole':'黑洞'};
   const bodyCount={};
   const blackHoleLabels=new Map();
+  const launchDial=$('launch-dial'),launchReference=$('launch-reference'),dialWheel=$('launch-dial-wheel');
+  const dialModes=[...launchDial.querySelectorAll('[data-launch-axis]')];
+  let launchOffset=null,dialOrigin,dialAxis='x',dialBearing=0,dialOffset=0,dialDrag;
   for(const body of bodiesAt(0)){
     const kind=body.kind??'star';
     bodyCount[kind]=(bodyCount[kind]??0)+1;
@@ -123,7 +127,10 @@
     const label=labels[kind]+' '+bodyCount[kind]+(profile&&profile.label!==labels[kind]?' · '+profile.label:'');
     $('body-focus').add(new Option(label,body.id));
     if(kind==='blackHole')blackHoleLabels.set(body.id,label);
+    const system=world.systems.find(item=>systemBodies.get(item.id).has(body.id));
+    launchReference.add(new Option(`${config.world&&system?systemLabels.get(system.id).split(' · ')[0]+' · ':''}${label}`,body.id));
   }
+  launchReference.value=launchSystem.bodies.find(body=>body.kind==='blackHole'||body.kind==='star').id;
   function getSweepSource(){
     const holes=bodiesAt(currentTick()).filter(body=>blackHoleLabels.has(body.id));
     const scope=activeScope();
@@ -145,7 +152,7 @@
       updateCamera();
     },
     receive,remove:removeFlight,observeClock,draw,exactHistory,ensureVisible:()=>{hiddenFlights=false;},
-    resumeLive:()=>setPlaying(true),wake:requestFrame,isLivePlaying:()=>playing,isHidden:()=>hiddenFlights,
+    resumeLive:()=>setSimulationPaused(false),wake:requestFrame,isLivePlaying:()=>playing,isHidden:()=>hiddenFlights,
     isOnline:()=>online&&!identityBusy,isSending:()=>sending,updateLaunch
   });
 
@@ -220,16 +227,20 @@
     ctx.fill();
   }
 
+  function drawLaunchMarker({x,y},label,color){
+    path([{x:x-10,y},{x:x+10,y}],color);
+    path([{x,y:y-10},{x,y:y+10}],color);
+    ctx.font='11px ui-monospace,monospace';
+    ctx.fillStyle=color;
+    ctx.fillText(label,x+14,y-12);
+  }
+
   function drawDraft(toScreen){
     const point=launchPosition&&toScreen(launchPosition);
     if(!point)return;
     const color=launchDraft?'#ffb37c':'#ff756b';
     const {x,y}=point;
-    path([{x:x-10,y},{x:x+10,y}],color);
-    path([{x,y:y-10},{x,y:y+10}],color);
-    ctx.font='11px ui-monospace,monospace';
-    ctx.fillStyle=color;
-    ctx.fillText(launchDraft?'待发射':'无效发射位置',x+14,y-12);
+    drawLaunchMarker(point,launchDraft?'待发射':'无效发射位置',color);
     if(!launchDraft||launchDraft.speed<=0)return;
     const heading=launchDraft.directionDeg*radians, elevation=launchDraft.pitchDeg*radians;
     const next=toScreen({x:launchPosition.x+Math.cos(heading)*Math.cos(elevation),
@@ -241,6 +252,29 @@
     path([point,end],color);
     path([{x:end.x-dx*8-dy*4,y:end.y-dy*8+dx*4},end,
       {x:end.x-dx*8+dy*4,y:end.y-dy*8-dx*4}],color);
+  }
+
+  function drawLaunchGuide(toScreen){
+    if(!launchDial.open||!dialOrigin||!launchPosition)return;
+    const {radius,bearing,height}=dialCoordinates();
+    const {x,y,z}=dialOrigin;
+    const reach=Math.max(radius,Math.abs(height),600)*1.4;
+    let points;
+    if(dialAxis==='y'){
+      points=Array.from({length:73},(_,index)=>{
+        const angle=index*TAU/72;
+        return {x:x+radius*Math.cos(angle),y:y+radius*Math.sin(angle),z:z+height};
+      });
+    }else if(dialAxis==='x'){
+      points=[{x,y,z:z+height},{x:x+reach*Math.cos(bearing),y:y+reach*Math.sin(bearing),z:z+height}];
+    }else{
+      const {x,y}=launchPosition;
+      points=[{x,y,z:z-reach},{x,y,z:z+reach}];
+    }
+    ctx.save();
+    ctx.setLineDash([5,4]);
+    path(points.map(toScreen),'#94f3e9',1.35);
+    ctx.restore();
   }
 
   function drawWave(projectSphere){
@@ -267,6 +301,7 @@
     const scope=activeScope(),replay=controls.replay;
     const flight=satellites.get(selectedFlight);
     const shown=flightState(),tick=fieldTick(),field=bodiesAt(tick);
+    if(!replay&&launchVisible)updateLaunchPosition(field);
     const liveVisible=shown&&['active','escaped'].includes(shown.status);
     const followed=focusedBody?field.find(body=>body.id===focusedBody):tracking&&!hiddenFlights&&(replay||liveVisible)?shown:null;
     if(followed)cameraTarget={x:followed.x,y:followed.y,z:followed.z??0};
@@ -357,6 +392,7 @@
     for(const marker of markers){ctx.globalAlpha=marker.opacity;dot(marker.point,marker.radius,marker.color);}
     ctx.globalAlpha=1;
     if(!replay&&launchVisible){
+      drawLaunchGuide(toScreen);
       ctx.fillStyle='#ffbe85b3';
       for(let index=0;index<predicted.length;index+=4){
         const point=toScreen(predicted[index]);
@@ -398,6 +434,11 @@
     drawWave(sphere);
     if(flight&&shown&&!hiddenFlights&&(replay||liveVisible)){
       drawSatellite(toScreen(shown),flight,replay?'回放 / '+flight.name:flight.name);
+    }
+    if(playing&&!replay&&!launchVisible&&!hiddenFlights&&flight?.id===lastLaunchedId){
+      const origin=flight.initial?.position;
+      const point=origin&&toScreen(origin);
+      if(point)drawLaunchMarker(point,'发射起点','#94f3e9');
     }
     const overlay=$('stage-flight');
     overlay.hidden=!flight||hiddenFlights;
@@ -456,7 +497,7 @@
   }
   function updatePlayback() {
     stopFrame();
-    $('play').textContent = playing ? '暂停画面' : '继续画面';
+    $('play').textContent = playing ? '暂停模拟' : '继续模拟';
     requestFrame();
   }
   function syncZoom(){
@@ -511,14 +552,22 @@
   function setPlaying(value){
     if(value===playing)return;
     if(!value){
-      frozenTick=currentTick();
-      frozenFlights=new Map([...satellites].map(([id,flight])=>[id,{...flight.observer.state}]));
+      frozenFlights=new Map([...satellites].map(([id,flight])=>[id,{...flight.state,status:flight.status}]));
     }else{
       for(const flight of satellites.values())flight.observer.accept({...flight.state,status:flight.status});
     }
     playing=value;updatePlayback();controls.render();draw();
   }
-  $('play').onclick = () => setPlaying(!playing);
+  async function setSimulationPaused(paused){
+    if(paused===!playing)return;
+    if(config.model.simulationPauseVersion!==1)throw new Error('请重启计算服务后使用暂停模拟。');
+    switchingPause=true;updateLaunch();
+    try{
+      const result=await api('/api/simulation/pause'+(worldQuery?'?'+worldQuery:''),{paused});
+      if(pageActive&&observeClock(result.server))receive(result.satellites);
+    }finally{switchingPause=false;updateLaunch();}
+  }
+  $('play').onclick=()=>setSimulationPaused(playing).catch(error=>{$('launch-status').textContent=error.message;});
   $('reset').onclick = () => {
     if(config.world)selector.value='map';
     yaw=defaultYaw;pitch=defaultPitch;selector.onchange();
@@ -529,10 +578,11 @@
     mapTool=tool;
     for(const button of document.querySelectorAll('[data-map-tool]'))button.setAttribute('aria-pressed',String(button.dataset.mapTool===tool));
     canvas.dataset.tool=tool;
-    const touchOnly=matchMedia('(hover: none)').matches;
-    $('map-hint').textContent=tool==='pick'?'点选当前 Z 平面上的发射点'
-      :tool==='rotate'?'拖动旋转 · 点「平移」返回默认操作'
-      :touchOnly?'拖动平移 · 点「旋转」切换视角':'左键平移 · 右键旋转 · 滚轮缩放';
+    const touchOnly=matchMedia('(max-width: 760px), (hover: none)').matches;
+    const touchHint=touchOnly?' · 双指缩放':'';
+    $('map-hint').textContent=tool==='pick'?'点选当前 Z 平面上的发射点'+touchHint
+      :tool==='rotate'?'拖动旋转'+(touchOnly?touchHint:' · 点「平移」返回默认操作')
+      :touchOnly?'单指平移 · 双指缩放':'左键平移 · 右键旋转 · 滚轮缩放';
   }
   for(const button of document.querySelectorAll('[data-map-tool]'))button.onclick=()=>setMapTool(button.dataset.mapTool);
   setMapTool(mapTool);
@@ -565,7 +615,12 @@
     }
     return underPointer??nearCenter??atFocalDepth(screenCenter.x,screenCenter.y);
   }
+  const pinch=camera.createPinchGesture({
+    start(){drag=null;},
+    zoom(factor,center){$('auto-fit').checked=false;setZoom(zoom*factor,screenPoint(center));}
+  });
   canvas.addEventListener('pointerdown', event => {
+    if(pinch.down(event)){canvas.setPointerCapture(event.pointerId);return;}
     if(drag||![0,1,2].includes(event.button))return;
     const primary=event.button===0&&!event.shiftKey;
     drag = {id:event.pointerId,x:event.clientX,y:event.clientY,
@@ -575,6 +630,7 @@
     canvas.setPointerCapture(event.pointerId);
   });
   canvas.addEventListener('pointermove', event => {
+    if(pinch.move(event))return;
     if (drag?.id !== event.pointerId) return;
     const dx=event.clientX-drag.x,dy=event.clientY-drag.y;
     if(Math.abs(dx)+Math.abs(dy)>0)drag.moved=true;
@@ -595,14 +651,16 @@
     updateCamera();
   });
   canvas.addEventListener('pointerup',event=>{
+    if(pinch.end(event))return;
     if(drag?.id!==event.pointerId||!drag.primary||drag.moved)return;
     const {x,y}=screenPoint(event),{toScreen,onPlane}=projection();
     if(drag.pick){
-      const height=form.elements.z.valueAsNumber;
+      const origin=bodiesAt(fieldTick()).find(body=>body.id===launchReference.value);
+      const height=form.elements.z.valueAsNumber+units.toKm(origin?.z??0);
       const point=Number.isFinite(height)&&onPlane(x,y,height);
-      if(!point){$('launch-status').textContent='该位置无法投影到当前 Z 平面。请填写 Z 或调整相机俯角。';return;}
-      form.elements.x.value=units.toKm(point.x).toFixed(6);
-      form.elements.y.value=units.toKm(point.y).toFixed(6);
+      if(!origin||!point){$('launch-status').textContent='该位置无法投影到当前 Z 平面。请填写 Z 或调整相机俯角。';return;}
+      setLaunchCoordinate('x',point.x-origin.x);
+      setLaunchCoordinate('y',point.y-origin.y);
       schedulePreview();
       return;
     }
@@ -620,7 +678,12 @@
     }
     if(closest)focusFlight(closest);
   });
-  canvas.addEventListener('lostpointercapture', () => {drag = null;});
+  function cancelDrag(event){
+    pinch.end(event);
+    if(drag?.id===event.pointerId)drag=null;
+  }
+  canvas.addEventListener('pointercancel',cancelDrag);
+  canvas.addEventListener('lostpointercapture',cancelDrag);
   canvas.addEventListener('contextmenu', event => event.preventDefault());
   canvas.addEventListener('wheel', event => {
     event.preventDefault();
@@ -660,7 +723,7 @@
       }
       if(playing||!old)observer.accept({...record.state,status:record.status});
       satellites.set(record.id,{...record,observer});
-      if(!playing&&!frozenFlights.has(record.id))frozenFlights.set(record.id,{...record.state,status:record.status});
+      if(!playing)frozenFlights.set(record.id,{...record.state,status:record.status});
     }
     if(!playing){controls.render();draw();}
   }
@@ -671,9 +734,20 @@
     if(selectedFlight===id)focusFlight('');
   }
   function observeClock(server){
-    if(!Number.isFinite(server?.tick)||server.tick<serverTick)return;
+    if(!Number.isFinite(server?.tick))return false;
+    if(Number.isInteger(server.pauseRevision)){
+      if(server.pauseRevision<pauseRevision||server.pauseRevision===pauseRevision&&server.tick<serverTick)return false;
+      pauseRevision=server.pauseRevision;
+    }else if(pauseRevision>=0||server.tick<serverTick)return false;
     serverTick=server.tick;
     tickSeen=performance.now();
+    if(typeof server.paused==='boolean'){
+      if(server.paused)frozenTick=server.tick;
+      const changed=playing===server.paused;
+      setPlaying(!server.paused);
+      if(changed&&launchVisible)schedulePreview();
+    }
+    return true;
   }
   function subscribe(){
     if(!pageActive)return;
@@ -692,8 +766,7 @@
           $('launch-status').textContent=healthy?'已连接，可发射':'计算服务暂停 · 请重新连接';
           updateLaunch();
         }
-        observeClock(snapshot.server);
-        receive(snapshot.satellites);
+        if(observeClock(snapshot.server))receive(snapshot.satellites);
       }catch(error){$('records-status').textContent=error.message;}
     });
     connection.onerror=()=>{
@@ -704,7 +777,11 @@
       updateLaunch();
     };
   }
-  function focusFlight(id){
+  function focusFlight(id,{preserveView=false}={}){
+    if(preserveView){
+      setTracking(false);
+      $('auto-fit').checked=false;
+    }
     selectedFlight=id;
     flightSelect.value=id;
     const flight=satellites.get(id);
@@ -715,7 +792,7 @@
     if(online||stream)subscribe();
     $('follow-flight').disabled=!flight;
     if(!flight){setTracking(false);cameraTarget=null;updateCamera();return;}
-    locateFlight(observed(id)??flight.state,true);
+    if(!preserveView)locateFlight(observed(id)??flight.state,true);
     const identity=userId;
     api('/api/satellites/'+encodeURIComponent(id)).then(({satellite})=>{
       if(pageActive&&userId===identity&&selectedFlight===id)receive([satellite]);
@@ -771,6 +848,10 @@
     if(radius>0&&base>0){
       zoom=moonReach?Math.min(width,height)*.32/(moonReach*base):Math.min(125,width*.14,height*.18)/(radius*base);
     }
+    if(launchReference.value!==id){
+      setLaunchReference(body);
+      keepLaunchInView();
+    }
     updateCamera();canvas.scrollIntoView({block:'nearest'});
   };
   $('auto-fit').onchange=()=>{
@@ -779,33 +860,142 @@
   };
   $('hide-flights').onclick=()=>{hiddenFlights=true;controls.leaveReplay();};
   $('show-flights').onclick=()=>{hiddenFlights=false;controls.leaveReplay();};
-  $('locate-launch').onclick=()=>{
-    if(!launchPosition)return;
+  function locateLaunch(){
     launchVisible=true;
-    locateFlight(launchPosition);canvas.scrollIntoView({block:'nearest'});
+    if(controls.replay)controls.leaveReplay();
+    updateLaunchPosition(bodiesAt(fieldTick()));
+    if(launchPosition)locateFlight(launchPosition);
+  }
+  $('locate-launch').onclick=locateLaunch;
+  function keepLaunchInView(){
+    if(!launchPosition||!width||!height)return;
+    const {x,y,z}=launchPosition;
+    if(Math.hypot(x,y,z)>model.MODEL.limits.maxRadius)return;
+    const point=projection().toScreen(launchPosition);
+    if(tracking||$('auto-fit').checked||!point||(!cameraTarget&&point.scale<.03)||
+      point.x<24||point.x>width-72||point.y<24||point.y>height-24)locateLaunch();
+  }
+
+  function dialCoordinates(){
+    const {x,y,z}=launchOffset;
+    const radius=Math.hypot(x,y);
+    return {radius,bearing:radius>1e-8?Math.atan2(y,x):dialBearing,height:z};
+  }
+  function dialStep(){
+    return $('launch-dial-fine').checked?1:dialAxis==='y'?5:20;
+  }
+  function renderLaunchDial(){
+    if(!launchDial.open)return;
+    const angular=dialAxis==='y',step=dialStep();
+    $('launch-dial-step').textContent=`每格 ${step}${angular?'°':' km'}`;
+    const ready=Boolean(dialOrigin&&launchPosition);
+    $('launch-dial-less').disabled=$('launch-dial-more').disabled=!ready;
+    const {radius,bearing,height}=ready?dialCoordinates():{};
+    const angle=((bearing/radians)%360+360)%360;
+    $('launch-dial-value').textContent=!ready?'—':angular?`${(Math.round(angle*10)%3600)/10}°`:
+      units.formatKm(units.toKm(dialAxis==='x'?radius:height));
+    dialWheel.style.setProperty('--dial-offset',`${dialOffset}px`);
+  }
+  function setLaunchCoordinate(axis,value){
+    form.elements[axis].value=units.toKm(value).toFixed(6);
+  }
+  function updateLaunchPosition(field){
+    const body=field.find(item=>item.id===launchReference.value);
+    dialOrigin=body&&{x:body.x,y:body.y,z:body.z??0};
+    launchPosition=dialOrigin&&launchOffset?{x:dialOrigin.x+launchOffset.x,
+      y:dialOrigin.y+launchOffset.y,z:dialOrigin.z+launchOffset.z}:null;
+  }
+  function setLaunchReference(body){
+    launchReference.value=body.id;
+    dialBearing=0;
+    const distance=body.rs?Math.max(350,3*body.rs):3*(body.collisionRadius??body.radius);
+    setLaunchCoordinate('x',distance);
+    setLaunchCoordinate('y',0);
+    setLaunchCoordinate('z',0);
+    schedulePreview();
+  }
+  function resetLaunchDial(){
+    if(controls.replay)controls.leaveReplay();
+    const body=bodiesAt(fieldTick()).find(item=>item.id===launchReference.value);
+    if(!body)return;
+    setLaunchReference(body);
+    locateLaunch();
+  }
+  function adjustLaunchDial(steps){
+    if(!dialOrigin||!launchPosition)return;
+    let {radius,bearing,height}=dialCoordinates();
+    const delta=steps*dialStep();
+    if(dialAxis==='z'){
+      setLaunchCoordinate('z',height+units.fromKm(delta));
+    }else{
+      if(dialAxis==='y')bearing+=delta*radians;
+      else radius=Math.max(0,radius+units.fromKm(delta));
+      dialBearing=bearing;
+      setLaunchCoordinate('x',radius*Math.cos(bearing));
+      setLaunchCoordinate('y',radius*Math.sin(bearing));
+    }
+    dialOffset=(dialOffset+steps*5)%16;
+    if(controls.replay)controls.leaveReplay();
+    schedulePreview();
+    keepLaunchInView();
+  }
+  launchDial.ontoggle=()=>{
+    renderLaunchDial();
+    draw();
   };
+  launchReference.onchange=$('launch-reference-reset').onclick=resetLaunchDial;
+  for(const button of dialModes)button.onclick=()=>{
+    dialAxis=button.dataset.launchAxis;
+    for(const mode of dialModes)mode.setAttribute('aria-pressed',String(mode===button));
+    launchVisible=true;
+    if(controls.replay)controls.leaveReplay();
+    keepLaunchInView();
+    renderLaunchDial();
+    draw();
+  };
+  $('launch-dial-fine').onchange=renderLaunchDial;
+  $('launch-dial-less').onclick=()=>adjustLaunchDial(-1);
+  $('launch-dial-more').onclick=()=>adjustLaunchDial(1);
+  dialWheel.addEventListener('wheel',event=>{
+    if(event.ctrlKey||!dialOrigin||!launchPosition)return;
+    const delta=Math.abs(event.deltaX)>Math.abs(event.deltaY)?event.deltaX:-event.deltaY;
+    if(!delta)return;
+    event.preventDefault();
+    adjustLaunchDial(Math.sign(delta));
+  },{passive:false});
+  dialWheel.addEventListener('pointerdown',event=>{
+    if(!event.isPrimary||event.button!==0||!dialOrigin||!launchPosition)return;
+    dialDrag={id:event.pointerId,x:event.clientX};
+    dialWheel.setPointerCapture(event.pointerId);
+  });
+  dialWheel.addEventListener('pointermove',event=>{
+    if(dialDrag?.id!==event.pointerId)return;
+    const steps=Math.trunc((event.clientX-dialDrag.x)/12);
+    if(!steps)return;
+    dialDrag.x+=steps*12;
+    adjustLaunchDial(steps);
+  });
+  dialWheel.addEventListener('lostpointercapture',()=>{dialDrag=null;});
   flightSelect.onchange=()=>focusFlight(flightSelect.value);
+  const presetButtons=[...form.querySelectorAll('[data-preset]')];
+  let selectedPreset='';
+  function selectPreset(mode){
+    selectedPreset=mode;
+    for(const button of presetButtons)button.setAttribute('aria-pressed',String(button.dataset.preset===mode));
+  }
   function launchInput(){
     const fields=new FormData(form);
     const number=key=>fields.get(key).trim()===''?NaN:Number(fields.get(key));
-    return {name:fields.get('name'),dimension:3,position:{x:number('x'),y:number('y'),z:number('z')},
+    return {name:fields.get('name'),dimension:3,referenceBodyId:launchReference.value,
+      position:{x:number('x'),y:number('y'),z:number('z')},
       massKg:number('mass'),speed:number('speed'),directionDeg:number('direction'),pitchDeg:number('pitch'),
       unitSystem:'si-km-v1',calibrationVersion:units.SCALE.version,modelVersion:model.MODEL.version,
-      dynamicsVersion:model.MODEL.dynamics.version,...(worldId?{worldId}:{})};
+      dynamicsVersion:model.MODEL.dynamics.version,...(worldId?{worldId}:{}),
+      ...(selectedPreset?{launchPreset:selectedPreset}:{})};
   }
-  function referenceFor(input){
-    const {x,y,z}=input.position;
-    const position={x:units.fromKm(x),y:units.fromKm(y),z:units.fromKm(z)};
-    return {position,reference:model.orbitReference(position,input.massKg,currentTick())};
-  }
-  for(const button of form.querySelectorAll('[data-preset]')){
+  for(const button of presetButtons){
     button.onclick=()=>{
-      const {position,reference}=referenceFor(launchInput());
-      const preset=model.launchPreset(position,reference,button.dataset.preset);
-      if(!preset)return;
-      form.elements.speed.value=units.toKmS(preset.speed).toFixed(6);
-      form.elements.direction.value=preset.directionDeg.toFixed(2);
-      form.elements.pitch.value=preset.pitchDeg.toFixed(2);
+      selectPreset(button.dataset.preset);
       schedulePreview();
     };
   }
@@ -814,30 +1004,44 @@
     const token=++previewToken;
     predicted=[];
     const input=launchInput();
-    const {position,reference}=referenceFor(input);
+    const tick=fieldTick(),{x,y,z}=input.position;
+    launchOffset=[x,y,z].every(Number.isFinite)?{x:units.fromKm(x),y:units.fromKm(y),z:units.fromKm(z)}:null;
+    updateLaunchPosition(bodiesAt(tick));
+    const reference=launchPosition&&model.orbitReference(launchPosition,input.massKg,tick,input.referenceBodyId);
     launchVisible=true;
-    launchPosition=Object.values(position).every(Number.isFinite)?position:null;
     launchDraft=null;
     let errorText='';
-    try{launchDraft=model.validateLaunch(input);}
+    let speed=input.speed;
+    try{
+      const resolved=model.resolveLaunch(input,tick);
+      speed=resolved.speed;
+      if(input.launchPreset){
+        form.elements.speed.value=resolved.speed.toFixed(6);
+        form.elements.direction.value=resolved.directionDeg.toFixed(2);
+        form.elements.pitch.value=resolved.pitchDeg.toFixed(2);
+      }
+      launchDraft=model.validateLaunch(resolved);
+    }
     catch(error){errorText=error.message;}
     $('validation-3d').textContent=errorText;
     $('locate-launch').disabled=!launchPosition;
-    const name=reference?.kind==='blackHole'?reference.name:labels[reference?.kind]??reference?.name;
+    renderLaunchDial();
+    const name=launchReference.selectedOptions[0]?.textContent;
     const format=value=>units.toKmS(value).toLocaleString('zh-CN',{maximumFractionDigits:2});
-    $('speed-reference').textContent=reference?`按${name}单体估算 · 圆轨道 ≈ ${format(reference.circular)} km/s · 逃逸 ≈ ${format(reference.escape)} km/s${reference.radius<3*reference.rs?' · 此半径无稳定圆轨道':''}${input.speed>.1*units.C_KM_S?' · 高速读数需相对论修正':''}`:'';
+    $('speed-reference').textContent=reference?`相对${name} · 环绕 ≈ ${format(reference.circular)} km/s · 逃逸临界 ≈ ${format(reference.escape)} km/s${reference.radius<3*reference.rs?' · 此半径无稳定圆轨道':''}${speed>.1*units.C_KM_S?' · 高速读数需相对论修正':''}`:'';
     updateLaunch();
     if(!playing)draw();
     if(!pageActive||!worker||!launchDraft||!$('predict-3d').checked)return;
-    previewTimer=setTimeout(()=>worker.postMessage({token,input,worldId,world:config.world,fieldTick:currentTick()}),180);
+    previewTimer=setTimeout(()=>worker.postMessage({token,input,worldId,world:config.world,fieldTick:tick}),180);
   }
   function updateLaunch(){
-    const busy=identityBusy||connecting||sending||controls.sweeping;
+    const busy=identityBusy||connecting||sending||switchingPause||controls.sweeping;
     $('launch-3d').disabled=!online||busy||(!launchDraft&&!pendingLaunch);
     $('reconnect-3d').disabled=busy;
     $('restore-3d').disabled=busy;
     $('rotate-key-3d').disabled=busy||!csrfToken;
     $('logout-3d').disabled=busy||!csrfToken;
+    $('play').disabled=!online||busy;
     controls.render();
   }
   function revealKey(key){
@@ -853,6 +1057,8 @@
       satellites.clear();frozenFlights.clear();removedFlights.clear();impacts.length=0;
       flightSelect.options.length=1;
       hiddenFlights=false;setTracking(false);cameraTarget=null;
+      pauseRevision=-1;serverTick=config.server?.tick??0;tickSeen=performance.now();
+      setPlaying(true);
       revealKey();controls.reset();
     }
     csrfToken=session.csrfToken;
@@ -883,7 +1089,7 @@
   }
   $('reconnect-3d').onclick=connect;
   async function manageIdentity(action){
-    if(identityBusy||connecting||sending||controls.sweeping)return;
+    if(identityBusy||connecting||sending||switchingPause||controls.sweeping)return;
     identityBusy=true;updateLaunch();
     const notice=$('identity-status');
     try{await action(notice);}
@@ -938,15 +1144,26 @@
     setTimeout(()=>URL.revokeObjectURL(url),1000);
   };
   $('dismiss-key-3d').onclick=()=>revealKey();
-  form.addEventListener('input',schedulePreview);
+  form.addEventListener('input',event=>{
+    if(launchDial.contains(event.target))return;
+    if(['speed','direction','pitch'].includes(event.target.name))selectPreset('');
+    schedulePreview();
+    if(event.target.closest('.coordinates'))keepLaunchInView();
+  });
   form.addEventListener('submit',async event=>{
     event.preventDefault();
     if($('launch-3d').disabled)return;
     if(!pendingLaunch){
       const input=launchInput();
-      try{model.validateLaunch(input);}
+      let absoluteInput;
+      try{
+        absoluteInput=model.resolveLaunch(input,currentTick());
+        model.validateLaunch(absoluteInput);
+      }
       catch(error){$('launch-status').textContent=error.message;return;}
-      pendingLaunch={...input,idempotencyKey:crypto.randomUUID()};
+      const supportsLaunch=config.model.launchReferenceVersion===1&&(!input.launchPreset||config.model.launchPresetVersion===1);
+      const request=supportsLaunch?input:absoluteInput;
+      pendingLaunch={...request,idempotencyKey:crypto.randomUUID()};
     }
     sending=true;updateLaunch();
     $('launch-status').textContent='正在发射…';
@@ -957,19 +1174,18 @@
       clearTimeout(previewTimer);
       receive([satellite]);
       lastLaunchedId=satellite.id;
-      focusFlight(satellite.id);
+      focusFlight(satellite.id,{preserveView:!playing||Boolean(config.world)});
       $('launch-status').textContent='已发射 '+satellite.name;
-      canvas.scrollIntoView({block:'nearest'});
+      if(playing)canvas.scrollIntoView({block:'nearest'});
     }catch(error){
       if(error.status>=400&&error.status<500&&![408,429].includes(error.status))pendingLaunch=null;
       if(error.status===401){online=false;$('reconnect-3d').hidden=false;}
       $('launch-status').textContent=error.message+(pendingLaunch?'。再次发射将重试同一组参数。':'');
     }finally{sending=false;updateLaunch();}
   });
-  const start=launchSystem;
-  form.elements.x.value=units.toKm(start.x+1200).toFixed(2);
-  form.elements.y.value=units.toKm(start.y).toFixed(2);
-  form.elements.z.value=units.toKm((start.z??0)+150).toFixed(2);
+  setLaunchCoordinate('x',1200);
+  setLaunchCoordinate('y',0);
+  setLaunchCoordinate('z',150);
   const observation=model.MODEL.observation;
   $('observation-3d').textContent='模型 '+model.MODEL.dynamics.version+' · 可观测区域半径 '+units.formatKm(units.toKm(observation.radius))+
     ' · 卫星越界后归档，可回放和导出。'+(blackHoleLabels.size
