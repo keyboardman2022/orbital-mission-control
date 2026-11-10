@@ -5,13 +5,19 @@ const {join,resolve,basename}=require('node:path');
 const {mkdirSync,openSync,writeFileSync,closeSync,readFileSync,unlinkSync,existsSync,statSync,createReadStream,readdirSync}=require('node:fs');
 const {timingSafeEqual}=require('node:crypto');
 const {createStreamState,buildSnapshot}=require('./stream-snapshot.js');
+const {archivePath}=require('./trajectory-store.js');
+const {SPATIAL_LAYOUT}=require('../shared/world-generator.js');
 const ROOT=resolve(__dirname,'..');
 const HELD_LOCKS=new Set();
-const FILES=new Set(['index.html','style.css','app.js','interactions.js','physics.js','camera.js','mission.html','mission.css','mission.js','history-webgl.js','preview-worker.js','orbital-visuals.js','stellar-renderer.js','shared/simulation.js','shared/units.js','shared/history-window.js','shared/map-sweep.js']);
+const FILES=new Set(['camera.js','history-webgl.js','preview-worker.js','orbital-visuals.js','stellar-renderer.js','shared/simulation.js','shared/units.js','shared/history-window.js','shared/map-sweep.js']);
 for(const file of ['seed-preview.html','seed-preview.css','seed-preview.js','shared/world-generator.js'])FILES.add(file);
 for(const file of ['map-3d.html','map-3d.css','map-3d.js','flight-controls-3d.js','mobile-map.css'])FILES.add(file);
+for(const file of ['gravity-lab.html','gravity-lab.css','gravity-lab.js','shared/nbody.js'])FILES.add(file);
 const TYPES={html:'text/html; charset=utf-8',css:'text/css; charset=utf-8',js:'text/javascript; charset=utf-8',json:'application/json; charset=utf-8',csv:'text/csv; charset=utf-8'};
 const error=(status,message)=>Object.assign(new Error(message),{status});
+function requireSpatial(dimension){
+  if(dimension!==3&&dimension!=='3')throw error(422,'当前星图只支持 3D');
+}
 function acquireLock(dataDir){
   const path=join(dataDir,'server.lock');
   if(HELD_LOCKS.has(path))throw new Error('该数据目录已有运行中的服务');
@@ -61,11 +67,34 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
   const rates=new Map();
   function rate(req,key,max){const id=(req.socket.remoteAddress||'local')+':'+key,now=Date.now(),old=rates.get(id);const r=old&&now-old.start<60000?old:{start:now,n:0};r.n++;rates.set(id,r);if(r.n>max)throw error(429,'操作过于频繁，请一分钟后重试');}
   function publicExport(record){const {satellite,model,world,...out}=record;return {...out,downloadUrl:record.status==='ready'?`/api/exports/${record.id}/download`:null};}
-  function removeExportFiles(ids){for(const id of ids)for(const suffix of ['.json','.csv','.json.partial','.csv.partial'])try{unlinkSync(join(exportsDir,id+suffix));}catch(error){if(error.code!=='ENOENT')console.error('清理导出文件失败：',error.message);}}
-  async function cancelSatelliteExports(satelliteId){
-    for(let i=exportQueue.length-1;i>=0;i--)if(exportQueue[i].satelliteId===satelliteId)exportQueue.splice(i,1);
-    const active=[...exportWorkers].filter(([,record])=>record.satelliteId===satelliteId).map(([worker])=>worker.terminate());
+  function unlinkIfPresent(path){try{unlinkSync(path);}catch(error){if(error.code!=='ENOENT')throw error;}}
+  function removeExportFiles(ids,{strict=false}={}){
+    for(const id of ids)for(const suffix of ['.json','.csv','.json.partial','.csv.partial']){
+      try{unlinkIfPresent(join(exportsDir,id+suffix));}
+      catch(e){if(strict)throw e;console.error('清理导出文件失败：',e.message);}
+    }
+  }
+  async function cancelSatelliteExports(ids){
+    const removed=new Set(ids);
+    for(let i=exportQueue.length-1;i>=0;i--)if(removed.has(exportQueue[i].satelliteId))exportQueue.splice(i,1);
+    const active=[...exportWorkers].filter(([,record])=>removed.has(record.satelliteId)).map(([worker])=>worker.terminate());
     await Promise.allSettled(active);
+  }
+  async function completeMapSwitch({userId,switchId,fromWorldId,cleanup}){
+    await cancelSatelliteExports(cleanup.ids);
+    try{
+      for(const file of cleanup.archives)unlinkIfPresent(archivePath(filename,file));
+      removeExportFiles(cleanup.exportIds,{strict:true});
+    }catch(e){
+      console.error('清理原地图文件失败：',e.message);
+      throw error(503,'原地图的文件暂未清理完成，请重试切换。');
+    }
+    if(await rpc('finishMapSwitch',userId,switchId))for(const stream of streams){
+      if(stream.userId===userId&&stream.worldId===fromWorldId){
+        stream.selectedId=null;
+        stream.res.write('event: map-cleared\ndata: {}\n\n');
+      }
+    }
   }
   function startExport(){
     if(closing||exportWorkers.size>=2||!exportQueue.length)return;
@@ -84,7 +113,10 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       if(path==='/health'){const health=await rpc('health');return json(res,health.status==='clock_error'?503:200,{ok:health.status==='running',...health});}
       if(!path.startsWith('/api/')){
         if(!['GET','HEAD'].includes(req.method))throw error(405,'不支持该请求方法');
-        const file=path==='/'?'index.html':path.slice(1);if(!FILES.has(file)||!existsSync(join(ROOT,file)))throw error(404,'页面不存在');
+        if(path==='/mission.html'){
+          res.writeHead(302,{Location:'/map-3d.html','Cache-Control':'no-cache'});return res.end();
+        }
+        const file=path==='/'||path==='/index.html'?'map-3d.html':path.slice(1);if(!FILES.has(file)||!existsSync(join(ROOT,file)))throw error(404,'页面不存在');
         res.writeHead(200,{'Content-Type':TYPES[file.split('.').at(-1)]||'application/octet-stream','Cache-Control':'no-cache'});
         if(req.method==='HEAD')return res.end();return createReadStream(join(ROOT,file)).on('error',()=>res.destroy()).pipe(res);
       }
@@ -94,10 +126,26 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       }
       const worldId=url.searchParams.get('worldId');
       if(path==='/api/worlds'&&req.method==='POST'){
-        rate(req,'worlds',30);return json(res,201,await rpc('registerWorld',await body(req)));
+        rate(req,'worlds',30);const input=await body(req),options=input.options===undefined?{}:input.options;
+        if(!options||typeof options!=='object'||Array.isArray(options))throw error(422,'数量配置必须是对象');
+        return json(res,201,await rpc('registerWorld',{seed:input.seed,options:{layout:SPATIAL_LAYOUT,...options}}));
       }
       if(path==='/api/model'&&req.method==='GET')return json(res,200,await rpc('modelInfo',worldId));
       const token=tokenOf(req),auth=await rpc('authenticate',token);if(mutating)checkCsrf(req,auth);
+      if(path==='/api/worlds/body-trajectory'&&req.method==='GET'){
+        return json(res,200,await rpc('bodyTrajectory',auth.userId,worldId,url.searchParams.get('bodyId')));
+      }
+      if(path==='/api/worlds/body-frame'&&req.method==='GET'){
+        const tick=url.searchParams.get('tick');
+        return json(res,200,await rpc('bodyFrame',auth.userId,worldId,tick==null?null:Number(tick)));
+      }
+      if(path==='/api/session'&&req.method==='GET')return json(res,200,{csrfToken:auth.csrfToken});
+      if(path==='/api/worlds/switch'&&req.method==='POST'){
+        rate(req,'map-switch',60);const input=await body(req);
+        const {deleted,cleanup}=await rpc('switchMap',auth.userId,input);
+        if(cleanup)await completeMapSwitch({userId:auth.userId,switchId:input.switchId,fromWorldId:input.fromWorldId,cleanup});
+        return json(res,200,{deleted});
+      }
       if(path==='/api/session/recover'&&req.method==='POST'){
         rate(req,'recovery',10);const input=await body(req),result=await rpc('recover',input.recoveryKey);await rpc('logout',token);cookie(res,result.token);const {token:secret,...safe}=result;return json(res,200,safe);
       }
@@ -108,33 +156,45 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
         const input=await body(req);
         return json(res,200,await rpc('setSpatialPaused',auth.userId,worldId,input.paused));
       }
+      if(path==='/api/simulation/rate'&&req.method==='POST'){
+        rate(req,'simulation-rate',120);
+        const input=await body(req);
+        return json(res,200,await rpc('setSpatialRate',auth.userId,worldId,input.rate));
+      }
       if(path==='/api/stream'&&req.method==='GET'){
         if([...streams].filter(s=>s.userId===auth.userId).length>=5)throw error(429,'实时连接过多，请关闭多余页面');
         const selectedId=url.searchParams.get('satelliteId');
-        const dimension=Number(url.searchParams.get('dimension')??2);
-        if(![2,3].includes(dimension))throw error(422,'不支持的星图维度');
+        requireSpatial(url.searchParams.get('dimension')??3);
         if(worldId)await rpc('modelInfo',worldId);
         if(selectedId){
           const selected=await rpc('get',auth.userId,selectedId);
-          if((selected.worldId??null)!==worldId||(selected.initial.dimension??2)!==dimension)throw error(404,'当前地图中找不到该卫星');
+          if((selected.worldId??null)!==worldId||selected.initial.dimension!==3)throw error(404,'当前地图中找不到该卫星');
         }
         res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});res.write('retry: 2000\n\n');
-        const stream={res,token,userId:auth.userId,worldId,dimension,selectedId,snapshot:createStreamState()};streams.add(stream);res.on('close',()=>streams.delete(stream));return;
+        const stream={res,token,userId:auth.userId,worldId,selectedId,snapshot:createStreamState()};streams.add(stream);res.on('close',()=>streams.delete(stream));return;
       }
-      if(path==='/api/satellites'&&req.method==='GET')return json(res,200,await rpc('list',auth.userId,Object.fromEntries(url.searchParams)));
+      if(path==='/api/satellites'&&req.method==='GET'){
+        requireSpatial(url.searchParams.get('dimension')??3);
+        return json(res,200,await rpc('list',auth.userId,{...Object.fromEntries(url.searchParams),dimension:3}));
+      }
       if(path==='/api/satellites'&&req.method==='POST'){
-        rate(req,'launch',120);return json(res,201,{satellite:await rpc('launch',auth.userId,await body(req))});
+        rate(req,'launch',120);const input=await body(req);requireSpatial(input.dimension);
+        return json(res,201,{satellite:await rpc('launch',auth.userId,{...input,dimension:3})});
       }
-      if(path==='/api/satellites/active'&&req.method==='GET')return json(res,200,await rpc('active',auth.userId,worldId,url.searchParams.get('dimension')));
+      if(path==='/api/satellites/active'&&req.method==='GET'){
+        requireSpatial(url.searchParams.get('dimension')??3);
+        return json(res,200,await rpc('active',auth.userId,worldId,3));
+      }
       if(path==='/api/satellites/terminate-many'&&req.method==='POST'){
-        rate(req,'sweep',120);const input=await body(req);return json(res,200,await rpc('terminateMany',auth.userId,input.ids,input.worldId,input.dimension));
+        rate(req,'sweep',120);const input=await body(req);requireSpatial(input.dimension===undefined?3:input.dimension);
+        return json(res,200,await rpc('terminateMany',auth.userId,input.ids,input.worldId,3));
       }
       const sat=path.match(/^\/api\/satellites\/([a-f0-9-]{36})(?:\/(trajectory|terminate|exports))?$/);
       if(sat){
         const [,id,action]=sat;
         if(!action&&req.method==='GET')return json(res,200,{satellite:await rpc('get',auth.userId,id)});
         if(!action&&req.method==='DELETE'){
-          rate(req,'delete',120);await rpc('get',auth.userId,id);await cancelSatelliteExports(id);
+          rate(req,'delete',120);await rpc('get',auth.userId,id);await cancelSatelliteExports([id]);
           const deleted=await rpc('deleteSatellite',auth.userId,id);removeExportFiles(deleted.exportIds);
           if(deleted.archiveCleanupFailures.length)console.error('部分轨迹归档文件未能清理：',deleted.archiveCleanupFailures.length);
           for(const stream of streams)if(stream.userId===auth.userId&&stream.selectedId===id)stream.selectedId=null;
@@ -166,8 +226,8 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       const cache=new Map();for(const s of streams){
         try{
           await rpc('authenticate',s.token);
-          const key=s.userId+':'+(s.worldId??'')+':'+s.dimension;
-          if(!cache.has(key))cache.set(key,await rpc('list',s.userId,{limit:100,worldId:s.worldId,dimension:s.dimension}));
+          const key=s.userId+':'+(s.worldId??'');
+          if(!cache.has(key))cache.set(key,await rpc('list',s.userId,{limit:100,worldId:s.worldId,dimension:3}));
           let data=cache.get(key);
           if(s.selectedId&&!data.satellites.some(p=>p.id===s.selectedId))data={...data,satellites:[...data.satellites,await rpc('get',s.userId,s.selectedId)]};
           if(s.res.writableLength>1024*1024){s.res.destroy();continue;}
@@ -180,7 +240,10 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
     const now=Date.now();for(const [key,r] of rates)if(now-r.start>60000)rates.delete(key);
     for(const file of readdirSync(exportsDir)){if(!/^[a-f0-9-]{36}\.(csv|json)(\.partial)?$/.test(file))continue;const path=join(exportsDir,file);try{if(now-statSync(path).mtimeMs>7*86400000)unlinkSync(path);}catch{}}
   },60000);cleanup.unref();
-  try{await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});}catch(e){clearInterval(push);clearInterval(cleanup);await worker.terminate();unlock();throw e;}
+  try{
+    for(const pending of await rpc('pendingMapSwitches'))await completeMapSwitch(pending).catch(()=>{});
+    await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
+  }catch(e){clearInterval(push);clearInterval(cleanup);await worker.terminate();unlock();throw e;}
   const url=`http://${host==='0.0.0.0'?'127.0.0.1':host}:${server.address().port}`;
   async function close(){
     if(closing)return;closing=true;clearInterval(push);clearInterval(cleanup);for(const s of streams)s.res.end();streams.clear();
@@ -191,7 +254,7 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
   return {server,url,close,worker};
 }
 if(require.main===module){startServer().then(app=>{
- console.log('ORBITAL listening '+app.url+'/mission.html');
+ console.log('ORBITAL listening '+app.url+'/map-3d.html');
  let stopping=false;
  app.worker.on('exit',()=>{if(!stopping){stopping=true;app.close().finally(()=>process.exit(1));}});
  for(const signal of ['SIGINT','SIGTERM'])process.on(signal,()=>{stopping=true;app.close().then(()=>process.exit(0));});

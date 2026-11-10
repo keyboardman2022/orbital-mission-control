@@ -7,12 +7,11 @@
   const units=OrbitalUnits,camera=OrbitalCamera;
   const worldQuery=worldId?'worldId='+encodeURIComponent(worldId):'';
   if(worldId){
-    $('back-to-2d').href='mission.html?'+worldQuery;
-    $('seed-3d').href='seed-preview.html?dimension=3&'+worldQuery;
-    $('classic-3d').hidden=false;
+    $('seed-3d').href='seed-preview.html?'+worldQuery;
   }
   let config, csrfToken='', stream, worker, previewTimer, previewToken=0, pendingLaunch;
-  let connecting=false, sending=false, switchingPause=false, pageActive=true, online=false, userId='', identityBusy=false;
+  let connecting=false, sending=false, switchingClock=false, pageActive=true, online=false, userId='', identityBusy=false;
+  let switchingMap=false, classicSwitchId;
   async function api(path,body,{method=body===undefined?'GET':'POST',signal}={}){
     const response=await fetch(path,{
       method,signal,
@@ -28,6 +27,7 @@
   catch{
     $('map-context').textContent='星图加载失败';
     $('launch-status').textContent='请确认计算服务已启动，再重新连接。';
+    $('classic-3d').hidden=!worldId;
     $('reconnect-3d').hidden=false;
     $('reconnect-3d').onclick=()=>location.reload();
     return;
@@ -37,7 +37,15 @@
     return;
   }
 
-  const model=config.world?OrbitalModel.createRuntime(config.world):OrbitalModel;
+  const dynamic=config.world?.motion===OrbitalWorldGenerator.N_BODY_MOTION;
+  let bodyFrame=null, archivedFrame=null, archiveRequest=null, bodyTrack=null, bodyTrackRequest=null;
+  const model=config.world?OrbitalModel.createRuntime(config.world,dynamic?tick=>{
+    if(!bodyFrame)return null;
+    const dt=Math.max(0,Math.min(.25*simulationRate,(tick-bodyFrame.tick)/OrbitalModel.MODEL.tickRate));
+    return dt===0?bodyFrame.bodies:bodyFrame.bodies.map(body=>({...body,
+      x:body.x+body.vx*dt,y:body.y+body.vy*dt,z:body.z+body.vz*dt}));
+  }:undefined):OrbitalModel;
+  const archiveModel=dynamic?OrbitalModel.createRuntime(config.world,()=>archivedFrame?.bodies??[]):null;
   const classicHole={id:'black-hole',kind:'blackHole',x:0,y:0,rs:model.MODEL.rs};
   const world=config.world??{seed:'经典地图',radius:model.MODEL.observation.radius,systems:[{
     id:'classic',x:0,y:0,extent:9500,bodies:[classicHole]
@@ -78,11 +86,11 @@
   const liveTrail=[];
   let trailTick=-1;
   const systemLabels = new Map(world.systems.map((system, index) => [
-    system.id, config.world?`S0${index + 1} · ${system.binary ? '双星' : '黑洞伴星'}`:'经典星系'
+    system.id, config.world?`S0${index + 1} · ${OrbitalWorldGenerator.systemLabel(system)}`:'经典星系'
   ]));
   selector.add(new Option('全图', 'map'));
   for (const [id, label] of systemLabels) selector.add(new Option(label, id));
-  const launchSystem = world.systems.find(system => !system.binary) ?? world.systems[0];
+  const launchSystem = world.systems.find(system => system.bodies.some(body => body.kind === 'blackHole')) ?? world.systems[0];
   const overviewLabel = `星系全图 · ${world.systems.length} 个星系`;
   let selected = config.world ? undefined : launchSystem;
   selector.value = selected?.id ?? 'map';
@@ -92,6 +100,11 @@
   $('map-context').textContent = config.world
     ? `当前种子 ${world.seed} · ${world.systems.length} 个星系 · ${totals.blackHole} 个黑洞 · ${totals.star} 颗恒星 · ${totals.planet} 颗行星${totals.moon?' · '+totals.moon+' 颗天然卫星':''}`
     : '经典地图 · 三维飞行';
+  if(dynamic){
+    $('map-context').textContent+=' · 多体引力';
+    $('body-archive').hidden=false;
+    $('mass-model-note').textContent='生成的天体彼此吸引。卫星只受引力，填写的卫星质量不会改变天体或卫星的轨迹。';
+  }
 
   const TAU = 2 * Math.PI, radians = Math.PI / 180;
   const background = Array.from({length:160}, (_, index) => ({
@@ -103,10 +116,12 @@
   let cameraOffset={x:0,y:0},visualTime=0;
   const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
   let playing = true, frame = null, lastFrame = null, drag = null;
-  let serverTick=config.server?.tick??0, tickSeen=performance.now(), frozenTick=serverTick;
+  let serverTick=dynamic?0:config.server?.tick??0, tickSeen=performance.now(), frozenTick=serverTick;
   let pauseRevision=-1;
+  let simulationRate=1;
+  const rateControl=$('simulation-rate');
   let frozenFlights=new Map();
-  const currentTick=()=>playing?serverTick+Math.max(0,performance.now()-tickSeen)/1000*model.MODEL.tickRate:frozenTick;
+  const currentTick=()=>playing?serverTick+Math.max(0,performance.now()-tickSeen)/1000*model.MODEL.tickRate*simulationRate:frozenTick;
   const activeScope=()=>selected??{x:0,y:0,extent:world.radius};
   const observed=id=>playing?satellites.get(id)?.observer.state:frozenFlights.get(id);
   const flightState=()=>controls.replay?controls.replay.point:observed(selectedFlight);
@@ -117,20 +132,64 @@
   const labels={star:'恒星',planet:'行星',moon:'天然卫星',blackHole:'黑洞','black-hole':'黑洞'};
   const bodyCount={};
   const blackHoleLabels=new Map();
+  const bodyLabels=new Map(),bodyHistorySelect=$('body-history-select');
   const launchDial=$('launch-dial'),launchReference=$('launch-reference'),dialWheel=$('launch-dial-wheel');
   const dialModes=[...launchDial.querySelectorAll('[data-launch-axis]')];
   let launchOffset=null,dialOrigin,dialAxis='x',dialBearing=0,dialOffset=0,dialDrag;
-  for(const body of bodiesAt(0)){
+  function rememberBody(body){
+    if(bodyLabels.has(body.id))return;
     const kind=body.kind??'star';
     bodyCount[kind]=(bodyCount[kind]??0)+1;
     const profile=OrbitalWorldGenerator.BODY_PROFILES[body.bodyClass];
     const label=labels[kind]+' '+bodyCount[kind]+(profile&&profile.label!==labels[kind]?' · '+profile.label:'');
+    bodyLabels.set(body.id,label);
     $('body-focus').add(new Option(label,body.id));
     if(kind==='blackHole')blackHoleLabels.set(body.id,label);
-    const system=world.systems.find(item=>systemBodies.get(item.id).has(body.id));
+    const system=world.systems.find(item=>item.id===body.systemId||systemBodies.get(item.id).has(body.id));
     launchReference.add(new Option(`${config.world&&system?systemLabels.get(system.id).split(' · ')[0]+' · ':''}${label}`,body.id));
+    if(dynamic)bodyHistorySelect.add(new Option(label,body.id));
   }
-  launchReference.value=launchSystem.bodies.find(body=>body.kind==='blackHole'||body.kind==='star').id;
+  function resetBodyChoices(){
+    for(const kind of Object.keys(bodyCount))delete bodyCount[kind];
+    bodyLabels.clear();blackHoleLabels.clear();
+    $('body-focus').options.length=1;launchReference.options.length=0;bodyHistorySelect.options.length=1;
+    for(const body of bodiesAt(0))rememberBody(body);
+    launchReference.value=launchSystem.bodies.find(body=>body.kind==='blackHole'||body.kind==='star').id;
+  }
+  resetBodyChoices();
+  function acceptBodyFrame(field){
+    bodyFrame=field;
+    const active=new Set(field.bodies.map(body=>body.id));
+    for(const body of field.catalog)rememberBody(body);
+    for(const option of [...$('body-focus').options,...launchReference.options]){
+      if(option.value)option.disabled=!active.has(option.value);
+    }
+    for(const option of bodyHistorySelect.options){
+      if(option.value)option.textContent=bodyLabels.get(option.value)+(active.has(option.value)?'':' · 已合并');
+    }
+    if(focusedBody&&!active.has(focusedBody))clearBodyFocus();
+    if(!active.has(launchReference.value)){
+      launchReference.value=field.bodies[0]?.id??'';
+      queueMicrotask(schedulePreview);
+    }
+  }
+  function historicalBodies(tick){
+    const wanted=Math.max(0,Math.round(tick/60)*60);
+    if(archiveRequest?.tick!==wanted&&!(bodyTrack?.playing&&archiveRequest?.pending)){
+      archiveRequest?.controller.abort();
+      const controller=new AbortController();
+      const request={tick:wanted,controller,pending:true};archiveRequest=request;
+      api('/api/worlds/body-frame?'+worldQuery+'&tick='+wanted,undefined,{signal:controller.signal}).then(frame=>{
+        request.pending=false;
+        if(archiveRequest!==request||!pageActive)return;
+        archivedFrame=frame;draw();
+      }).catch(error=>{
+        request.pending=false;
+        if(error.name!=='AbortError'&&archiveRequest===request)$('body-history-status').textContent=error.message;
+      });
+    }
+    return archiveModel.stellarBodiesAtTick(wanted,true);
+  }
   function getSweepSource(){
     const holes=bodiesAt(currentTick()).filter(body=>blackHoleLabels.has(body.id));
     const scope=activeScope();
@@ -157,10 +216,12 @@
   });
 
   function projection(atZoom=zoom) {
-    const scope=activeScope(),{extent}=scope,center=cameraTarget??scope;
+    const scope=activeScope(),center=bodyTrack?.position??cameraTarget??scope;
+    // Center on the selected system while keeping the full seeded map in camera space.
+    const extent=config.world?world.radius:scope.extent;
     const azimuthSin = Math.sin(yaw), azimuthCos = Math.cos(yaw);
     const elevationSin = Math.sin(pitch * radians), elevationCos = Math.cos(pitch * radians);
-    const view=camera.view(width,height,atZoom,cameraOffset);
+    const view=camera.view(width,height,atZoom,bodyTrack?undefined:cameraOffset);
     const cameraSpace=point=>{
       const x=(point.x-center.x)/extent,y=(point.y-center.y)/extent;
       const z=((point.z??0)-(center.z??0))/extent;
@@ -300,8 +361,14 @@
     if (!width || !height) return;
     const scope=activeScope(),replay=controls.replay;
     const flight=satellites.get(selectedFlight);
-    const shown=flightState(),tick=fieldTick(),field=bodiesAt(tick);
-    if(!replay&&launchVisible)updateLaunchPosition(field);
+    const shown=flightState(),tick=fieldTick();
+    const historyTick=bodyTrack?bodyTrack.time*model.MODEL.tickRate:replay?tick:null;
+    const frameBodies=dynamic&&historyTick!==null?historicalBodies(historyTick):bodiesAt(tick);
+    const field=bodyTrack?[
+      ...frameBodies.filter(body=>body.id!==bodyTrack.body.id),
+      {...bodyTrack.body,...bodyTrack.position}
+    ]:frameBodies;
+    if(!replay&&!bodyTrack&&launchVisible)updateLaunchPosition(field);
     const liveVisible=shown&&['active','escaped'].includes(shown.status);
     const followed=focusedBody?field.find(body=>body.id===focusedBody):tracking&&!hiddenFlights&&(replay||liveVisible)?shown:null;
     if(followed)cameraTarget={x:followed.x,y:followed.y,z:followed.z??0};
@@ -316,7 +383,7 @@
       }
     }
     let {toScreen,sphere,view:spatialView}=projection();
-    if($('auto-fit').checked&&shown&&!hiddenFlights){
+    if(!bodyTrack&&$('auto-fit').checked&&shown&&!hiddenFlights){
       const point=toScreen(shown);
       if(point){
         const view=camera.view(width,height,zoom,cameraOffset);
@@ -343,10 +410,7 @@
     }
 
     const stars=[],markers=[];
-    const positions=config.world
-      ? selected?field.filter(body=>systemBodies.get(selected.id).has(body.id)):field
-      : field;
-    if (!selected) {
+    if (config.world || !selected) {
       for (const system of world.systems) {
         const point=toScreen(system);
         if(!point)continue;
@@ -361,7 +425,7 @@
         ctx.fillText(systemLabels.get(system.id), point.x + 15, point.y - 7);
       }
     }
-    for(const body of positions){
+    for(const body of field){
       const point=toScreen(body);
       if(!point)continue;
       if(body.kind==='blackHole'){
@@ -391,7 +455,7 @@
     }else for(const star of stars)visuals.star(ctx,star,star.appearance,star.star,surfaceTime);
     for(const marker of markers){ctx.globalAlpha=marker.opacity;dot(marker.point,marker.radius,marker.color);}
     ctx.globalAlpha=1;
-    if(!replay&&launchVisible){
+    if(!replay&&!bodyTrack&&launchVisible){
       drawLaunchGuide(toScreen);
       ctx.fillStyle='#ffbe85b3';
       for(let index=0;index<predicted.length;index+=4){
@@ -412,7 +476,7 @@
           if(point&&point.x>=0&&point.x<=width&&point.y>=0&&point.y<=height)ctx.fillRect(point.x,point.y,1.5,1.5);
         }
       }
-    }else if(!hiddenFlights){
+    }else if(!bodyTrack&&!hiddenFlights){
       if(liveVisible){
         OrbitalVisuals.renderTrailPoints(ctx,liveTrail,sample=>{
           const point=toScreen(sample);
@@ -432,16 +496,27 @@
       }
     }
     drawWave(sphere);
-    if(flight&&shown&&!hiddenFlights&&(replay||liveVisible)){
+    if(!bodyTrack&&flight&&shown&&!hiddenFlights&&(replay||liveVisible)){
       drawSatellite(toScreen(shown),flight,replay?'回放 / '+flight.name:flight.name);
     }
-    if(playing&&!replay&&!launchVisible&&!hiddenFlights&&flight?.id===lastLaunchedId){
+    if(!bodyTrack&&playing&&!replay&&!launchVisible&&!hiddenFlights&&flight?.id===lastLaunchedId){
       const origin=flight.initial?.position;
       const point=origin&&toScreen(origin);
       if(point)drawLaunchMarker(point,'发射起点','#94f3e9');
     }
+    if(bodyTrack){
+      const trail=[];
+      for(const sample of bodyTrack.points){
+        if(sample.elapsedSeconds>=bodyTrack.time)break;
+        trail.push(toScreen(sample));
+      }
+      const marker=toScreen(bodyTrack.position);
+      trail.push(marker);
+      if(trail.length>1)path(trail,'#8af3e7b3',1.5);
+      if(marker)drawLaunchMarker(marker,'历史位置','#94f3e9');
+    }
     const overlay=$('stage-flight');
-    overlay.hidden=!flight||hiddenFlights;
+    overlay.hidden=bodyTrack||!flight||hiddenFlights;
     const label=replay?'回放 · '+(flight?.name??'')+' · '+replay.time.toFixed(2)+' 模拟秒'
       :flight?[flight.id===lastLaunchedId?'已发射 '+flight.name:flight.name,statuses[shown?.status??flight.status],
         shown&&units.formatSpeed(shown,flight.calibration),shown&&'Z '+units.formatKm(units.toKm(shown.z))]
@@ -473,7 +548,7 @@
     if(lastFrame!==null){
       const seconds=(now-lastFrame)/1000,dt=Math.min(seconds,.1);
       if(playing){
-        for(const flight of satellites.values())flight.observer.advance(seconds,{collect:false});
+        for(const flight of satellites.values())flight.observer.advance(seconds*simulationRate,{collect:false});
         const observedFlight=observed(selectedFlight);
         if(observedFlight?.status==='active'&&observedFlight.tick-trailTick>=12){
           trailTick=observedFlight.tick;
@@ -484,6 +559,10 @@
         while(impacts.length&&visualTime-impacts[0].born>=2.4)impacts.shift();
       }
       controls.advance(dt);
+      if(bodyTrack?.playing){
+        seekBody(Math.min(bodyTrack.end,bodyTrack.time+dt*Number(bodyHistoryRate.value)));
+        if(bodyTrack.time===bodyTrack.end)setBodyPlayback(false);
+      }
     }
     lastFrame=now;
     draw();
@@ -492,7 +571,7 @@
   }
   function requestFrame(){
     if(frame!==null||!pageActive||document.hidden)return;
-    if(playing||controls.replay?.playing||controls.sweeping)frame=requestAnimationFrame(animate);
+    if(playing||bodyTrack?.playing||controls.replay?.playing||controls.sweeping)frame=requestAnimationFrame(animate);
     else lastFrame=null;
   }
   function updatePlayback() {
@@ -529,7 +608,7 @@
   function setZoom(value,anchor){
     const nextZoom=Math.max(minZoom,Math.min(camera.MAX_ZOOM,value));
     // Tracking already projects the target at the view origin, so keep that origin fixed.
-    if(anchor&&!tracking&&!focusedBody&&width&&height){
+    if(anchor&&!bodyTrack&&!tracking&&!focusedBody&&width&&height){
       const view=camera.view(width,height,zoom,cameraOffset);
       const changed=camera.zoomAt(view,view.scale*nextZoom/zoom,anchor);
       const base=camera.view(width,height,nextZoom);
@@ -545,6 +624,11 @@
     clearBodyFocus();
     $('auto-fit').checked=false;
     cameraTarget=null;
+    if(dynamic&&selected){
+      const members=bodiesAt(currentTick()).filter(body=>body.systemId===selected.id||systemBodies.get(selected.id).has(body.id));
+      if(members.length)cameraTarget=Object.fromEntries(['x','y','z'].map(axis=>[axis,
+        members.reduce((sum,body)=>sum+body[axis],0)/members.length]));
+    }
     cameraOffset={x:0,y:0};zoom=fitZoom();
     updateCamera();
   };
@@ -561,13 +645,22 @@
   async function setSimulationPaused(paused){
     if(paused===!playing)return;
     if(config.model.simulationPauseVersion!==1)throw new Error('请重启计算服务后使用暂停模拟。');
-    switchingPause=true;updateLaunch();
+    return changeSimulationClock('pause',{paused});
+  }
+  async function changeSimulationClock(action,values){
+    switchingClock=true;updateLaunch();
     try{
-      const result=await api('/api/simulation/pause'+(worldQuery?'?'+worldQuery:''),{paused});
+      const result=await api('/api/simulation/'+action+(worldQuery?'?'+worldQuery:''),values);
       if(pageActive&&observeClock(result.server))receive(result.satellites);
-    }finally{switchingPause=false;updateLaunch();}
+    }finally{switchingClock=false;updateLaunch();}
   }
   $('play').onclick=()=>setSimulationPaused(playing).catch(error=>{$('launch-status').textContent=error.message;});
+  rateControl.onchange=async()=>{
+    const rate=Number(rateControl.value);
+    if(rate===simulationRate)return;
+    try{await changeSimulationClock('rate',{rate});}
+    catch(error){rateControl.value=String(simulationRate);$('launch-status').textContent=error.message;}
+  };
   $('reset').onclick = () => {
     if(config.world)selector.value='map';
     yaw=defaultYaw;pitch=defaultPitch;selector.onchange();
@@ -591,14 +684,13 @@
     return {x:event.clientX-bounds.left,y:event.clientY-bounds.top};
   }
   function rotationPivot(pointer){
-    if(focusedBody||tracking)return null;
+    if(bodyTrack||focusedBody||tracking)return null;
     const {toScreen,atFocalDepth}=projection();
     const screenCenter={x:width/2,y:height/2};
     let underPointer,nearCenter;
     let pointerDistance=Infinity,centerDistance=Infinity;
     const centerSearchRadius=Math.min(width,height)*.24;
     for(const body of bodiesAt(fieldTick())){
-      if(config.world&&selected&&!systemBodies.get(selected.id).has(body.id))continue;
       const point=toScreen(body);
       if(!point)continue;
       // The disk extends past the shadow and can still fill the view with its center offscreen.
@@ -635,7 +727,10 @@
     const dx=event.clientX-drag.x,dy=event.clientY-drag.y;
     if(Math.abs(dx)+Math.abs(dy)>0)drag.moved=true;
     if(drag.pick)return;
-    if(drag.pan){setTracking(false);clearBodyFocus();$('auto-fit').checked=false;cameraOffset.x+=dx;cameraOffset.y+=dy;}
+    if(drag.pan){
+      if(bodyTrack)return;
+      setTracking(false);clearBodyFocus();$('auto-fit').checked=false;cameraOffset.x+=dx;cameraOffset.y+=dy;
+    }
     else if(dx||dy){
       const nextYaw=yaw+dx*.009,nextPitch=pitch+dy*.28;
       $('auto-fit').checked=false;
@@ -652,7 +747,7 @@
   });
   canvas.addEventListener('pointerup',event=>{
     if(pinch.end(event))return;
-    if(drag?.id!==event.pointerId||!drag.primary||drag.moved)return;
+    if(bodyTrack||drag?.id!==event.pointerId||!drag.primary||drag.moved)return;
     const {x,y}=screenPoint(event),{toScreen,onPlane}=projection();
     if(drag.pick){
       const origin=bodiesAt(fieldTick()).find(body=>body.id===launchReference.value);
@@ -739,13 +834,18 @@
       if(server.pauseRevision<pauseRevision||server.pauseRevision===pauseRevision&&server.tick<serverTick)return false;
       pauseRevision=server.pauseRevision;
     }else if(pauseRevision>=0||server.tick<serverTick)return false;
+    const rate=config.model.simulationRates?.includes(server.simulationRate)?server.simulationRate:1;
+    const rateChanged=rate!==simulationRate;
+    if(rateChanged)lastFrame=null;
+    simulationRate=rate;rateControl.value=String(rate);
+    if(dynamic&&server.bodyField)acceptBodyFrame(server.bodyField);
     serverTick=server.tick;
     tickSeen=performance.now();
     if(typeof server.paused==='boolean'){
       if(server.paused)frozenTick=server.tick;
       const changed=playing===server.paused;
       setPlaying(!server.paused);
-      if(changed&&launchVisible)schedulePreview();
+      if((changed||rateChanged)&&launchVisible)schedulePreview();
     }
     return true;
   }
@@ -756,6 +856,9 @@
     if(selectedFlight)query.set('satelliteId',selectedFlight);
     const connection=new EventSource('/api/stream?'+query);
     stream=connection;
+    connection.addEventListener('map-cleared',()=>{
+      if(pageActive&&stream===connection&&!switchingMap)location.reload();
+    });
     connection.addEventListener('snapshot',event=>{
       if(!pageActive||stream!==connection)return;
       try{
@@ -834,9 +937,10 @@
     hiddenFlights=false;locateFlight(flightState());canvas.scrollIntoView({block:'nearest'});
   };
   $('body-focus').onchange=event=>{
+    closeBodyTrack(false);
     const id=event.target.value,body=bodiesAt(fieldTick()).find(candidate=>candidate.id===id);
     if(!body){clearBodyFocus();return;}
-    const system=world.systems.find(candidate=>systemBodies.get(candidate.id).has(id));
+    const system=world.systems.find(candidate=>candidate.id===body.systemId||systemBodies.get(candidate.id).has(id));
     selector.value=system?.id??(config.world?'map':'classic');
     selector.onchange();
     focusedBody=id;
@@ -853,6 +957,68 @@
       keepLaunchInView();
     }
     updateCamera();canvas.scrollIntoView({block:'nearest'});
+  };
+  function closeBodyTrack(redraw=true){
+    const hadTrack=Boolean(bodyTrack||bodyTrackRequest);
+    bodyTrackRequest?.abort();bodyTrackRequest=null;bodyTrack=null;
+    if(!hadTrack)return;
+    if(!controls.replay){archiveRequest?.controller.abort();archiveRequest=null;archivedFrame=null;}
+    $('body-history-scrub').hidden=true;$('body-history-close').hidden=true;
+    $('body-history-status').textContent='';
+    $('body-history-load').disabled=!bodyHistorySelect.value;
+    if(redraw)draw();
+  }
+  const bodyTimeline=$('body-history-timeline'),bodyHistoryTime=$('body-history-time');
+  const bodyHistoryPlay=$('body-history-play'),bodyHistoryRate=$('body-history-rate');
+  function setBodyPlayback(playing){
+    bodyTrack.playing=playing;
+    bodyHistoryPlay.textContent=playing?'暂停':'播放';
+    if(playing)requestFrame();
+  }
+  function seekBody(time){
+    if(!bodyTrack)return;
+    bodyTrack.time=time;
+    bodyTrack.position=OrbitalHistory.interpolate(bodyTrack.points,time);
+    bodyTimeline.value=time;
+    const label=time.toFixed(2)+' 模拟秒';
+    if(bodyHistoryTime.textContent!==label)bodyHistoryTime.textContent=label;
+  }
+  bodyTimeline.oninput=()=>{
+    seekBody(Number(bodyTimeline.value));
+    draw();
+  };
+  bodyHistoryPlay.onclick=()=>{
+    if(!bodyTrack||bodyTrack.start===bodyTrack.end)return;
+    if(!bodyTrack.playing&&bodyTrack.time===bodyTrack.end)seekBody(bodyTrack.start);
+    setBodyPlayback(!bodyTrack.playing);
+    draw();
+  };
+  bodyHistorySelect.onchange=()=>{closeBodyTrack();$('body-history-load').disabled=!bodyHistorySelect.value;};
+  $('body-history-close').onclick=()=>closeBodyTrack();
+  $('history-3d').addEventListener('click',()=>closeBodyTrack(false));
+  $('body-history-load').onclick=async()=>{
+    const id=bodyHistorySelect.value;
+    if(!id||!online)return;
+    closeBodyTrack(false);
+    const controller=new AbortController();bodyTrackRequest=controller;
+    const status=$('body-history-status');
+    $('body-history-load').disabled=true;status.textContent='正在读取天体轨迹…';
+    try{
+      const {body,points}=await api('/api/worlds/body-trajectory?'+worldQuery+'&bodyId='+encodeURIComponent(id),undefined,{signal:controller.signal});
+      if(bodyTrackRequest!==controller||!pageActive)return;
+      if(!points.length)throw new Error('当前天体还没有轨迹。');
+      controls.leaveReplay();setTracking(false);clearBodyFocus();$('auto-fit').checked=false;
+      const samples=points.map(point=>({...point,elapsedSeconds:point.tick/model.MODEL.tickRate}));
+      const start=samples[0].elapsedSeconds,end=samples.at(-1).elapsedSeconds;
+      bodyTrack={body:{...body,rs:body.kind==='blackHole'?body.radius:0},points:samples,start,end,playing:false};
+      bodyTimeline.min=start;bodyTimeline.max=end;
+      bodyTimeline.disabled=bodyHistoryPlay.disabled=bodyHistoryRate.disabled=start===end;
+      setBodyPlayback(false);
+      $('body-history-scrub').hidden=false;$('body-history-close').hidden=false;
+      status.textContent=`${bodyLabels.get(id)} · ${body.endTick==null?'历史轨迹':'合并前轨迹'}`;
+      seekBody(start);draw();
+    }catch(error){if(bodyTrackRequest===controller&&error.name!=='AbortError')status.textContent=error.message;}
+    finally{if(bodyTrackRequest===controller){bodyTrackRequest=null;$('body-history-load').disabled=false;}}
   };
   $('auto-fit').onchange=()=>{
     if($('auto-fit').checked){setTracking(false);clearBodyFocus();cameraTarget=null;cameraOffset={x:0,y:0};}
@@ -1004,7 +1170,7 @@
     const token=++previewToken;
     predicted=[];
     const input=launchInput();
-    const tick=fieldTick(),{x,y,z}=input.position;
+    const tick=dynamic?currentTick():fieldTick(),{x,y,z}=input.position;
     launchOffset=[x,y,z].every(Number.isFinite)?{x:units.fromKm(x),y:units.fromKm(y),z:units.fromKm(z)}:null;
     updateLaunchPosition(bodiesAt(tick));
     const reference=launchPosition&&model.orbitReference(launchPosition,input.massKg,tick,input.referenceBodyId);
@@ -1031,17 +1197,18 @@
     $('speed-reference').textContent=reference?`相对${name} · 环绕 ≈ ${format(reference.circular)} km/s · 逃逸临界 ≈ ${format(reference.escape)} km/s${reference.radius<3*reference.rs?' · 此半径无稳定圆轨道':''}${speed>.1*units.C_KM_S?' · 高速读数需相对论修正':''}`:'';
     updateLaunch();
     if(!playing)draw();
-    if(!pageActive||!worker||!launchDraft||!$('predict-3d').checked)return;
-    previewTimer=setTimeout(()=>worker.postMessage({token,input,worldId,world:config.world,fieldTick:tick}),180);
+    if(!pageActive||!worker||!launchDraft||!$('predict-3d').checked||dynamic&&!bodyFrame)return;
+    previewTimer=setTimeout(()=>worker.postMessage({token,input,worldId,world:config.world,fieldTick:tick,...(dynamic?{bodyField:bodyFrame}:{})}),180);
   }
   function updateLaunch(){
-    const busy=identityBusy||connecting||sending||switchingPause||controls.sweeping;
+    const busy=identityBusy||connecting||sending||switchingClock||switchingMap||controls.sweeping;
     $('launch-3d').disabled=!online||busy||(!launchDraft&&!pendingLaunch);
     $('reconnect-3d').disabled=busy;
     $('restore-3d').disabled=busy;
     $('rotate-key-3d').disabled=busy||!csrfToken;
     $('logout-3d').disabled=busy||!csrfToken;
     $('play').disabled=!online||busy;
+    rateControl.disabled=!online||busy||!config.model.simulationRates;
     controls.render();
   }
   function revealKey(key){
@@ -1057,7 +1224,9 @@
       satellites.clear();frozenFlights.clear();removedFlights.clear();impacts.length=0;
       flightSelect.options.length=1;
       hiddenFlights=false;setTracking(false);cameraTarget=null;
-      pauseRevision=-1;serverTick=config.server?.tick??0;tickSeen=performance.now();
+      pauseRevision=-1;serverTick=dynamic?0:config.server?.tick??0;tickSeen=performance.now();
+      simulationRate=1;rateControl.value='1';
+      if(dynamic){closeBodyTrack(false);bodyFrame=null;resetBodyChoices();}
       setPlaying(true);
       revealKey();controls.reset();
     }
@@ -1088,8 +1257,27 @@
     }finally{connecting=false;updateLaunch();}
   }
   $('reconnect-3d').onclick=connect;
+  const classicLink=$('classic-3d');
+  classicLink.onclick=async event=>{
+    if(event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;
+    event.preventDefault();
+    if(switchingMap)return;
+    const notice=$('launch-status');
+    if(!csrfToken||identityBusy||connecting||sending||switchingClock){
+      notice.textContent='请等当前操作完成后再切换地图。';
+      return;
+    }
+    switchingMap=true;updateLaunch();
+    notice.textContent='正在清理原地图的数据…';
+    try{
+      classicSwitchId??=crypto.randomUUID();
+      await api('/api/worlds/switch',{fromWorldId:worldId,toWorldId:null,switchId:classicSwitchId});
+      location.assign('map-3d.html');
+    }catch(error){notice.textContent=error.message;switchingMap=false;updateLaunch();}
+  };
+  classicLink.hidden=!worldId;
   async function manageIdentity(action){
-    if(identityBusy||connecting||sending||switchingPause||controls.sweeping)return;
+    if(identityBusy||connecting||sending||switchingClock||controls.sweeping)return;
     identityBusy=true;updateLaunch();
     const notice=$('identity-status');
     try{await action(notice);}
@@ -1208,6 +1396,7 @@
     stopFrame();
     clearTimeout(previewTimer);
     worker?.terminate();
+    bodyTrackRequest?.abort();archiveRequest?.controller.abort();
     stream?.close();
     controls.reset();
     historyRenderer?.destroy();

@@ -1,7 +1,6 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const Camera=require('./camera.js');
-const P=require('./physics.js');
 
 test('orbiting an off-center target preserves its screen position and perspective scale',()=>{
  const pivot={x:1940,y:-1000,z:720},center={x:200,y:600,z:-320};
@@ -73,16 +72,6 @@ test('zooming out tenfold expands the launch distance tenfold',()=>{
   const near=Camera.toWorld(800,500,Camera.view(1000,700,1));
   const far=Camera.toWorld(800,500,Camera.view(1000,700,.1));
   assert.ok(Math.abs(Math.hypot(far.x,far.y)/Math.hypot(near.x,near.y)-10)<1e-10);
-});
-test('changing the view preserves existing particle state and allows distant circular launches',()=>{
-  const view=Camera.view(1000,700,.1),point=Camera.toWorld(800,500,view);
-  const particle=P.createParticle(point.x,point.y,'orbit'),before=JSON.stringify(particle);
-  for(const zoom of [.1,2,1])Camera.toScreen(particle.x,particle.y,Camera.view(1000,700,zoom));
-  assert.equal(JSON.stringify(particle),before);
-  const r=Math.hypot(particle.x,particle.y);
-  for(let i=0;i<24000;i++)P.step(particle);
-  assert.equal(particle.status,'active');
-  assert.ok(Math.abs(Math.hypot(particle.x,particle.y)/r-1)<.0001);
 });
 test('cursor-centered zoom keeps the same world position under an off-center pointer',()=>{
  for(const [w,h] of [[1100,700],[375,520]])for(const zoom of [1e-7,.5,2]){

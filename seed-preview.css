@@ -73,6 +73,7 @@ h1 { margin: 8px 0 7px; font-size: clamp(30px, 5vw, 44px); letter-spacing: -.04e
 .map-key span { display: flex; gap: 6px; align-items: center; }
 .map-key i { display: inline-block; width: 8px; height: 8px; border: 1px solid #b4c2df; border-radius: 50%; }
 .map-key .key-binary { background: #b4c2df; border-radius: 1px; transform: rotate(45deg); }
+.map-key .key-triple { border-style: dashed; }
 .map-stats { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0; border-block: 1px solid var(--line); }
 .spatial-card .map-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .spatial-card th:first-child, .spatial-card td:first-child { width: 32%; }

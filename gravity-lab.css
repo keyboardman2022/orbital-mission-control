@@ -1,0 +1,35 @@
+.lab-intro{display:flex;justify-content:space-between;align-items:end;gap:20px;margin:0 0 16px}
+.lab-intro>p{color:var(--muted);margin:0;max-width:36ch}
+.lab-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(250px,320px);gap:14px;align-items:start}
+.lab-stage{height:clamp(300px,calc(100svh - 200px),760px)}
+.lab-hud{position:absolute;inset:14px 14px auto;display:flex;flex-wrap:wrap;gap:6px;pointer-events:none;font:12px/1.5 ui-monospace,monospace}
+.lab-hud span,.lab-hint{background:#0c1526e8;border:1px solid var(--line);border-radius:6px;padding:4px 8px;color:var(--muted)}
+.lab-hud output{color:var(--text)}
+.lab-hud .lab-mode{color:var(--cyan)}
+.lab-hint{position:absolute;bottom:10px;right:12px;margin:0;font-size:12px;pointer-events:none}
+.lab-tools{margin-top:8px;display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.lab-tools label{font-size:13px;color:var(--muted)}
+.lab-check{display:flex;align-items:center;gap:5px}
+.lab-check input{accent-color:var(--cyan);cursor:pointer}
+.lab .lab-primary{color:#091522;background:var(--cyan);font-weight:700;border-color:transparent}
+.lab-inspector{display:grid;gap:12px;min-width:0}
+.lab-panel h2{font-size:17px}
+.lab-panel form label{margin-top:9px}
+.lab-form-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.lab-form-actions button{flex:1 0 auto}
+.lab-error{color:#ffc098;font-size:13px}
+.lab-legend{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));list-style:none;padding:0;margin:12px 0 0;gap:5px 8px}
+.lab-legend li{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}
+.lab-legend i{height:8px;width:8px;border-radius:50%;flex:none}
+.lab-log{margin:8px 0;padding-left:21px;color:var(--text);font-size:12px;overflow-wrap:anywhere}
+.lab-log li+li{margin-top:5px}
+.lab-model{border-top:1px solid var(--line);padding-top:10px;margin:10px 0 0;color:var(--muted);font-size:12px}
+@media(max-width:760px){
+  .lab{padding:12px 10px 24px}
+  .lab-intro{display:block;margin-bottom:10px}
+  .lab-intro>p{max-width:none;font-size:13px;margin-top:4px}
+  .lab-layout{grid-template-columns:minmax(0,1fr)}
+  .lab-stage{height:clamp(250px,50svh,440px)}
+  .lab-hud{inset:8px 8px auto;font-size:11px}
+  .lab button,.lab select{min-height:44px}
+}

@@ -17,9 +17,8 @@ function initializeStore(db){db.exec(`CREATE TABLE IF NOT EXISTS trajectory_chun
  file TEXT NOT NULL UNIQUE,checksum TEXT NOT NULL,PRIMARY KEY(satellite_id,first_seq));
  CREATE INDEX IF NOT EXISTS trajectory_chunks_time ON trajectory_chunks(satellite_id,first_tick,last_tick);`);}
 function hasStore(db){return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='trajectory_chunks'").get();}
-function archivePath(filename,file){
+function archivePath(filename,file,directory=join(dirname(filename),'trajectories')){
  if(typeof file!=='string'||file!==basename(file)||!/^[a-f0-9-]+\.json\.gz$/.test(file))throw Error('Invalid trajectory archive path');
- const directory=join(dirname(filename),'trajectories');
  if(fs.existsSync(directory)&&fs.lstatSync(directory).isSymbolicLink())throw Error('Invalid trajectory archive directory path');
  const path=join(directory,file);if(fs.existsSync(path)&&fs.lstatSync(path).isSymbolicLink())throw Error('Invalid trajectory archive file path');return path;
 }

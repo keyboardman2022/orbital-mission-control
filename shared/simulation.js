@@ -5,13 +5,14 @@
     commonJS ? require('./world-generator.js') : root.OrbitalWorldGenerator);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.OrbitalModel = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function createRuntime(units, generator, world) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function createRuntime(units, generator, world, bodyProvider) {
   'use strict';
   // Paczynski–Wiita test particles; scene units, not relativistic geodesics.
   const sweepSpeed=150,sweepSeconds=600,observationRadius=sweepSpeed*sweepSeconds;
   const centralMu=2000000,schwarzschildRadius=66,tickRate=240;
   if(world&&world.version!==generator.VERSION)throw new RangeError('此种子地图版本暂不受支持');
   const muPerSolarMass=generator?.MU_PER_SOLAR_MASS;
+  const dynamic=world?.motion===generator?.N_BODY_MOTION&&!!world?.motion;
   const star=(id,name,orbitRadius,massRatio,collisionRadius,phase,color)=>{
     const angularSpeed=Math.sqrt(centralMu*orbitRadius)/(orbitRadius-schwarzschildRadius)/orbitRadius;
     return Object.freeze({id,name,orbitRadius,massRatio,mu:centralMu*massRatio,collisionRadius,
@@ -31,8 +32,9 @@
   const MODEL = Object.freeze({
     version: world?'seeded-pw-2d-v1':'pw-2d-v3', mu: world?0:centralMu, rs: world?0:schwarzschildRadius, captureRadius: world?0:69.3,
     tickRate, step: 1 / tickRate, stars, launchReferenceVersion:1, simulationPauseVersion:1, launchPresetVersion:1,
-    dynamics: Object.freeze(world?{version:'seeded-multi-attractor-v1',maxMassKg:1e30,
-      referenceFrame:'world origin; +Y up',approximation:'prescribed body orbits, PW black holes and softened Newtonian stars and planets'
+    simulationRates:Object.freeze([1,2,4,8]),
+    dynamics: Object.freeze(world?{version:dynamic?'seeded-nbody-v1':'seeded-multi-attractor-v1',maxMassKg:1e30,
+      referenceFrame:'world origin; +Y up',approximation:dynamic?'softened Newtonian interacting celestial bodies and passive satellites':'prescribed body orbits, PW black holes and softened Newtonian stars and planets'
     }:{version:'multi-attractor-pw-v1',legacyVersion:'two-body-pw-v1',maxMassKg:1e30,centralMassKg:units.centralMassKg,
       referenceFrame:'satellite position and velocity relative to the fixed central black hole',
       approximation:'finite-mass PW black hole plus prescribed Newtonian stellar attractors; not GR, no star-star or satellite-satellite forces'}),
@@ -41,7 +43,7 @@
     calibration: units?.SCALE,
     units: Object.freeze({ length: 'scene length', time: 'simulation second', mass: 'kg', speed: 'scene length / simulation second', angle: 'degrees; +X = 0, counterclockwise; +Y up' })
   });
-  const holes=world?world.systems.flatMap(system=>system.bodies.filter(body=>body.kind==='blackHole').map(body=>({x:system.x,y:system.y,z:system.z??0,radius:body.radius}))):[];
+  const holes=world&&!dynamic?world.systems.flatMap(system=>system.bodies.filter(body=>body.kind==='blackHole').map(body=>({x:system.x,y:system.y,z:system.z??0,radius:body.radius}))):[];
   const radiusAt=(x,y,z)=>z===undefined?Math.hypot(x,y):Math.hypot(x,y,z);
   function fail(message, status = 422) { const e = new Error(message); e.status = status; throw e; }
   function validateLaunch(input) {
@@ -87,7 +89,7 @@
       ...(p.dynamicsVersion===MODEL.dynamics.version?{fieldTick:Number.isFinite(options.fieldTick)?options.fieldTick:0}:{}),
       ...(options.continuousTracking ? {continuousTracking:true} : {}) };
   }
-  function effectiveMu(massKg) {return world?centralMu*massKg/units.centralMassKg:MODEL.mu*(1+massKg/units.centralMassKg);}
+  function effectiveMu(massKg) {return dynamic?0:world?centralMu*massKg/units.centralMassKg:MODEL.mu*(1+massKg/units.centralMassKg);}
   function circularSpeed(r,mu=MODEL.mu,rs=MODEL.rs) { return Math.sqrt(mu * r) / (r - rs); }
   // Period is in simulation seconds (normal live playback uses one per wall second).
   // Solve on the stable circular-orbit branch; this is an observation criterion,
@@ -137,13 +139,15 @@
     for(const body of candidates){
       if(!body)continue;
       const radius=radiusAt(x-body.x,y-body.y,z===undefined?undefined:z-body.z);
-      if(!nearest||radius<nearest.radius)nearest={...body,radius,mu:body.mu+(body.rs?effectiveMu(massKg):0)};
+      if(!nearest||radius<nearest.radius)nearest={...body,radius,rs:dynamic?0:body.rs,mu:body.mu+(body.rs?effectiveMu(massKg):0)};
     }
     if(!nearest||nearest.radius<=Math.max(1.05*(nearest.rs??0),nearest.collisionRadius??0))return null;
     const {radius,mu,rs}=nearest;
     if(referenceBodyId!==undefined&&z!==undefined&&!rs){
-      const before=launchBodyAtTick(referenceBodyId,tick-.5),after=launchBodyAtTick(referenceBodyId,tick+.5);
       const softenedDistance=Math.hypot(radius,nearest.softening??0);
+      if(dynamic)return {...nearest,circular:Math.sqrt(mu)*radius/softenedDistance**1.5,escape:Math.sqrt(2*mu/softenedDistance),
+        velocity:{x:nearest.vx,y:nearest.vy,z:nearest.vz}};
+      const before=launchBodyAtTick(referenceBodyId,tick-.5),after=launchBodyAtTick(referenceBodyId,tick+.5);
       return {...nearest,circular:Math.sqrt(mu)*radius/softenedDistance**1.5,escape:Math.sqrt(2*mu/softenedDistance),
         velocity:{x:(after.x-before.x)*tickRate,y:(after.y-before.y)*tickRate,z:((after.z??0)-(before.z??0))*tickRate}};
     }
@@ -192,6 +196,8 @@
       pitchDeg:Math.asin(Math.sin(tilt)*Math.cos(turn))*180/Math.PI};
   }
   const stellarTickCache=new Map(),spatialTickCache=new Map();
+  const initialField=dynamic?world.systems.flatMap(system=>generator.bodyPositions(system)):null;
+  const dynamicCache=new WeakMap();
   let spatialPlanes;
   function planesForWorld(){
     if(!spatialPlanes){
@@ -201,6 +207,13 @@
     return spatialPlanes;
   }
   function stellarBodiesAtTick(fieldTick=0,spatial=false) {
+    if(dynamic){
+      const source=bodyProvider?.(fieldTick)??initialField;
+      if(!dynamicCache.has(source))dynamicCache.set(source,Object.freeze(source.map(body=>Object.freeze({...body,
+        massSolar:body.mass??body.massSolar,mu:muPerSolarMass*(body.mass??body.massSolar),
+        rs:body.kind==='blackHole'?body.radius:0,collisionRadius:body.radius,softening:generator.N_BODY_SOFTENING}))));
+      return dynamicCache.get(source);
+    }
     const cache=spatial?spatialTickCache:stellarTickCache;
     if(Number.isSafeInteger(fieldTick)&&cache.has(fieldTick))return cache.get(fieldTick);
     const seconds=fieldTick/MODEL.tickRate;
@@ -229,7 +242,7 @@
       let value=(s.vx*s.vx+s.vy*s.vy+(s.vz??0)**2)/2;
       for(const body of bodies||stellarBodiesAtTick(s.fieldTick,s.z!==undefined)){
         const r=radiusAt(s.x-body.x,s.y-body.y,s.z===undefined?undefined:s.z-body.z);
-        value-=body.rs?(body.mu+(s.gravitationalMu??0))/Math.max(r-body.rs,body.rs*.05):body.mu/Math.hypot(r,body.softening);
+        value-=body.rs&&!dynamic?(body.mu+(s.gravitationalMu??0))/Math.max(r-body.rs,body.rs*.05):body.mu/Math.hypot(r,body.softening);
       }
       return value;
     }
@@ -251,7 +264,7 @@
       const dx=star.x-x,dy=star.y-y,dz=z===undefined?undefined:star.z-z;
       const distanceSquared=dx*dx+dy*dy+(dz??0)**2+star.softening**2;
       const distance=star.rs?radiusAt(dx,dy,dz):0;
-      const factor=star.rs?(star.mu+mu)/(Math.max(distance,star.rs)*Math.max(distance-star.rs,star.rs*.05)**2):star.mu/distanceSquared**1.5;
+      const factor=star.rs&&!dynamic?(star.mu+mu)/(Math.max(distance,star.rs)*Math.max(distance-star.rs,star.rs*.05)**2):star.mu/distanceSquared**1.5;
       result.x+=dx*factor;result.y+=dy*factor;
       if(dz!==undefined)result.z+=dz*factor;
     }
@@ -280,7 +293,9 @@
     const start=startBodies||stellarBodiesAtTick(startTick,z!==undefined),end=endBodies||stellarBodiesAtTick(endTick,z!==undefined);
     let first=null;
     for(let i=0;i<start.length;i++){
-      const a=start[i],b=end[i],startX=x-a.x,startY=y-a.y,endX=nx-b.x,endY=ny-b.y;
+      const a=start[i];
+      const b=dynamic?(end[i]?.id===a.id?end[i]:end.find(body=>body.id===a.id)??a):end[i];
+      const startX=x-a.x,startY=y-a.y,endX=nx-b.x,endY=ny-b.y;
       const startZ=z===undefined?undefined:z-a.z,endZ=nz===undefined?undefined:nz-b.z;
       const fraction=radiusAt(startX,startY,startZ)<=a.collisionRadius?0:crossing(startX,startY,endX,endY,a.collisionRadius,false,startZ,endZ);
       if(fraction!==null&&(!first||fraction<first.fraction))first={fraction,star:a,endStar:b};
@@ -352,5 +367,5 @@
     return { tick: s.tick, elapsedSeconds: s.elapsedSeconds, x: s.x, y: s.y, vx: s.vx, vy: s.vy,...(s.z!==undefined?{z:s.z,vz:s.vz}:{}),
       kind: s.status === 'active' ? 'sample' : s.status };
   }
-  return Object.freeze({ MODEL, createRuntime:world=>createRuntime(units,generator,world), resolveLaunch, validateLaunch, createState, step, effectiveMu, acceleration, fieldAcceleration, stellarBodiesAtTick, circularSpeed, circularRadiusForPeriod, escapeSpeed, orbitReference, launchPreset, energy, angularMomentum, snapshot });
+  return Object.freeze({ MODEL, createRuntime:(world,bodyProvider)=>createRuntime(units,generator,world,bodyProvider), resolveLaunch, validateLaunch, createState, step, effectiveMu, acceleration, fieldAcceleration, stellarBodiesAtTick, circularSpeed, circularRadiusForPeriod, escapeSpeed, orbitReference, launchPreset, energy, angularMomentum, snapshot });
 });

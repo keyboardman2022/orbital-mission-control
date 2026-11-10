@@ -3,7 +3,8 @@ const {DatabaseSync}=require('node:sqlite');
 const {randomUUID,randomBytes,createHash}=require('node:crypto');
 const M=require('../shared/simulation.js');
 const U=require('../shared/units.js');
-const {generateWorld}=require('../shared/world-generator.js');
+const {generateWorld,N_BODY_MOTION}=require('../shared/world-generator.js');
+const {BodyFields}=require('./body-fields.js');
 const {createSampler,POLICY}=require('./trajectory-sampler.js');
 const Budget=require('./trajectory-budget.js');
 const {initializeStore,readPoints,archiveBatch,archivePath}=require('./trajectory-store.js');
@@ -38,6 +39,8 @@ class Engine{
       CREATE INDEX IF NOT EXISTS points_time ON points(satellite_id,tick);
       CREATE TABLE IF NOT EXISTS events(satellite_id TEXT NOT NULL REFERENCES satellites(id),seq INTEGER NOT NULL,event TEXT NOT NULL,PRIMARY KEY(satellite_id,seq));
       CREATE TABLE IF NOT EXISTS exports(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),satellite_id TEXT NOT NULL REFERENCES satellites(id),record TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS map_switches(user_id TEXT NOT NULL REFERENCES users(id),id TEXT NOT NULL,
+        from_world TEXT,to_world TEXT,deleted INTEGER NOT NULL,cleanup TEXT,PRIMARY KEY(user_id,id));
     `);
     initializeStore(this.db);
     if(!this.db.prepare("SELECT 1 FROM pragma_table_info('points') WHERE name='z'").get()){
@@ -53,10 +56,12 @@ class Engine{
     this.tick=saved.tick;this.realtimeRemainder=0;this.lastGoodWallMs=saved.savedWallMs??this.now();this.clockError=this.now()<this.lastGoodWallMs-1000?'系统时钟早于最近保存时刻，请校准后重启':null;
     this.spatialClocks=new Map(this.db.prepare("SELECT key,value FROM meta WHERE key LIKE 'spatial-clock:%'").all()
       .map(({key,value})=>[key,JSON.parse(value)]));
+    this.bodyFields=new BodyFields(this.db);
+    this.bodyFields.restore(worldId=>this.worldInfo(worldId).world);
     this.records=new Map();this.dirty=new Set();this.pending=[];this.pendingEvents=[];
     for(const row of this.db.prepare('SELECT record FROM satellites').iterate()){
       const r=JSON.parse(row.record);if(r.status==='active'||r.status==='queued'){
-        if(r.worldId)this.recordRuntimes.set(r,this.worldInfo(r.worldId).runtime);
+        if(r.worldId)this.recordRuntimes.set(r,this.bodyFields.get(r.ownerId,r.worldId)?.runtime??this.worldInfo(r.worldId).runtime);
         const budgetBefore=JSON.stringify(r.trajectoryBudget);Budget.ensure(r,this.trajectoryPolicy);
         if(JSON.stringify(r.trajectoryBudget)!==budgetBefore)this.dirty.add(r.id);
         // Keep all committed coordinates/times; extend tracking only for live records.
@@ -105,24 +110,49 @@ class Engine{
     if(!this.diskCheckedAt||performance.now()-this.diskCheckedAt>1000){this.diskCheckedAt=performance.now();const size=path=>{try{return statSync(path).size;}catch{return 0;}};this.diskMetrics={databaseBytes:size(this.filename),walBytes:size(this.filename+'-wal')};}
     return {tick:this.tick,lagSeconds:0,status:this.clockError?'clock_error':'running',clockMode:'runtime-only-v1',active:this.records.size,clockError:this.clockError,storage:{...this.metrics,...this.diskMetrics,bufferedStates:[...this.samplers.values()].reduce((sum,s)=>sum+s.size-1,0),pendingPoints:this.pending.length}};
   }
-  spatialTick(clock){return (clock?.pausedAt??this.tick)-(clock?.offset??0);}
+  spatialTick(clock){
+    const at=clock?.pausedAt??this.tick;
+    if(clock?.anchorTick!==undefined)return clock.fieldTick+(at-clock.anchorTick)*clock.rate;
+    return at-(clock?.offset??0);
+  }
+  ensureBodyField(userId,worldId,world=this.worldInfo(worldId).world){
+    if(world?.motion!==N_BODY_MOTION)return null;
+    const existing=this.bodyFields.get(userId,worldId);
+    if(existing)return existing;
+    const key=spatialClockKey(userId,worldId),previous=this.spatialClocks.get(key);
+    const clock={offset:this.tick,pausedAt:null,revision:previous?.revision??0};
+    const field=this.bodyFields.open(userId,worldId,world);
+    try{this.checkpoint(()=>this.sql.clock.run(key,JSON.stringify(clock)));}
+    catch(error){this.bodyFields.forget(userId,worldId);throw error;}
+    this.spatialClocks.set(key,clock);
+    return field;
+  }
   viewClock(userId,worldId,dimension){
     const server=this.health();
     if(dimension!==3)return server;
+    const field=this.ensureBodyField(userId,worldId);
     const clock=this.spatialClocks.get(spatialClockKey(userId,worldId));
-    return {...server,tick:this.spatialTick(clock),paused:clock?.pausedAt!=null,pauseRevision:clock?.revision??0};
+    return {...server,tick:this.spatialTick(clock),paused:clock?.pausedAt!=null,pauseRevision:clock?.revision??0,simulationRate:clock?.rate??1,
+      ...(field?{bodyField:field.snapshot()}:{})};
   }
   setSpatialPaused(userId,worldId,paused){
-    this.worldInfo(worldId);
     if(typeof paused!=='boolean')fail(422,'请选择暂停或继续模拟');
+    return this.configureSpatialClock(userId,worldId,{paused});
+  }
+  setSpatialRate(userId,worldId,rate){
+    if(!M.MODEL.simulationRates.includes(rate))fail(422,'请选择支持的模拟倍速');
+    return this.configureSpatialClock(userId,worldId,{rate});
+  }
+  configureSpatialClock(userId,worldId,{paused,rate}){
+    this.ensureBodyField(userId,worldId);
     if(this.clockError)fail(503,'服务器时钟异常，暂不能切换模拟状态');
     const key=spatialClockKey(userId,worldId);
-    const clock=this.spatialClocks.get(key)??{offset:0,pausedAt:null,revision:0};
-    if(paused!==(clock.pausedAt!==null)){
-      const next={offset:paused?clock.offset:clock.offset+this.tick-clock.pausedAt,
-        pausedAt:paused?this.tick:null,revision:clock.revision+1};
-      this.checkpoint();
-      this.sql.clock.run(key,JSON.stringify(next));
+    const clock=this.spatialClocks.get(key),wasPaused=clock?.pausedAt!=null,oldRate=clock?.rate??1;
+    const nextPaused=paused??wasPaused,nextRate=rate??oldRate;
+    if(nextPaused!==wasPaused||nextRate!==oldRate){
+      const next={anchorTick:this.tick,fieldTick:this.spatialTick(clock),rate:nextRate,
+        pausedAt:nextPaused?this.tick:null,revision:(clock?.revision??0)+1};
+      this.checkpoint(()=>this.sql.clock.run(key,JSON.stringify(next)));
       this.spatialClocks.set(key,next);
     }
     return this.active(userId,worldId,3);
@@ -159,7 +189,8 @@ class Engine{
     telemetry:U.telemetry(r.state,r.initial.calibration||U.SCALE),trajectoryCoverage:Budget.coverage(r)});}
   get(userId,id){return this.publicRecord(this.owned(userId,id));}
   launch(userId,input){
-    const {worldId,runtime}=this.worldInfo(input.worldId);
+    const info=this.worldInfo(input.worldId),{worldId}=info;
+    const field=this.ensureBodyField(userId,worldId,info.world),runtime=field?.runtime??info.runtime;
     const idem=input.idempotencyKey,relative=input.referenceBodyId!==undefined||input.launchPreset!==undefined;
     let initial=relative?null:runtime.validateLaunch(input);
     if(typeof idem!=='string'||idem.length<8||idem.length>128)fail(422,'发射请求缺少有效幂等键');
@@ -174,6 +205,8 @@ class Engine{
     if(old){if(old.request_hash!==requestHash)fail(409,'同一发射请求不能更换参数');return this.get(userId,old.id);}
     const fieldTick=input.dimension===3?this.spatialTick(this.spatialClocks.get(spatialClockKey(userId,worldId))):this.tick;
     initial??=runtime.validateLaunch(runtime.resolveLaunch(input,fieldTick));
+    if(field&&field.at(fieldTick).some(body=>body.kind==='blackHole'&&Math.hypot(initial.position.x-body.x,
+      initial.position.y-body.y,initial.position.z-body.z)<=body.radius))fail(422,'位置在黑洞捕获面内，无法发射');
     if(initial.dynamicsVersion!==runtime.MODEL.dynamics.version)fail(409,'新发射必须使用当前多引力源动力学版本，请刷新页面');
     if(this.clockError)fail(503,'服务器时钟异常，暂不能发射');
     if(this.records.size>=this.maxActive)fail(503,'当前并发计算容量已满，请稍后发射；已有卫星继续运行');
@@ -242,19 +275,35 @@ class Engine{
   advanceTo(target,{maxSteps=Infinity,budgetMs=Infinity}={}){
     if(this.clockError)return;
     const started=performance.now();let steps=0;
+    const fields=[],flights=[];
+    let rounds=1;
+    const schedule=(work,item,clock)=>{
+      if(clock?.pausedAt!=null)return;
+      const rate=clock?.rate??1;
+      work.push({item,rate});rounds=Math.max(rounds,rate);
+    };
+    for(const field of this.bodyFields.fields.values())schedule(fields,field,this.spatialClocks.get(spatialClockKey(field.userId,field.worldId)));
+    for(const r of this.records.values())if(r.status==='active'){
+      const clock=r.initial.dimension===3?this.spatialClocks.get(spatialClockKey(r.ownerId,r.worldId)):undefined;
+      schedule(flights,r,clock);
+    }
+    let liveFlights=flights.length;
     while(this.tick<target&&steps<maxSteps&&performance.now()-started<budgetMs){
-      const active=[...this.records.values()].filter(r=>r.status==='active'&&
-        (r.initial.dimension!==3||this.spatialClocks.get(spatialClockKey(r.ownerId,r.worldId))?.pausedAt==null));
-      if(!active.length){this.tick=target;break;}
-      for(const r of active){
-        const sampler=this.ensureSampler(r);(this.recordRuntimes.get(r)??M).step(r.state);this.metrics.rawSteps++;if(sampler)sampler.push(M.snapshot(r.state));this.dirty.add(r.id);
-        if(r.state.status!=='active'){this.finish(r,r.state.status);continue;}
-        if(sampler?.size>=POLICY.blockTicks+1)this.flushSampler(r);
+      if(!liveFlights&&!fields.length){this.tick=target;break;}
+      // Advance each celestial field immediately before the matching satellite step.
+      for(let round=0;round<rounds;round++){
+        for(const {item:field,rate} of fields)if(round<rate)field.advanceTo(field.tick+1);
+        for(const {item:r,rate} of flights){
+          if(round>=rate||r.status!=='active')continue;
+          const sampler=this.ensureSampler(r);(this.recordRuntimes.get(r)??M).step(r.state);this.metrics.rawSteps++;if(sampler)sampler.push(M.snapshot(r.state));this.dirty.add(r.id);
+          if(r.state.status!=='active'){this.finish(r,r.state.status);liveFlights--;continue;}
+          if(sampler?.size>=POLICY.blockTicks+1)this.flushSampler(r);
+        }
       }
       this.tick++;steps++;
     }
   }
-  checkpoint(){
+  checkpoint(extra){
     const started=performance.now();
     for(const id of this.dirty){const r=this.records.get(id);if(r&&this.samplers.has(id))this.flushSampler(r);}
     if(!this.clockError)this.lastGoodWallMs=Math.max(this.lastGoodWallMs,this.now());
@@ -262,8 +311,11 @@ class Engine{
       for(const {id,p} of this.pending)this.insertPoint(id,p);
       for(const e of this.pendingEvents)this.sql.event.run(e.id,e.seq,JSON.stringify(e.event));
       for(const id of this.dirty){const r=this.records.get(id);if(r)this.sql.record.run(JSON.stringify(r),id);}
+      this.bodyFields.flush();
+      extra?.();
       this.sql.clock.run('clock',JSON.stringify({mode:'runtime-only-v1',epochMs:this.now()-this.tick/M.MODEL.tickRate*1000,tick:this.tick,savedWallMs:this.lastGoodWallMs}));
     });
+    this.bodyFields.committed();
     this.metrics.savedPoints+=this.pending.length;this.metrics.checkpointMs=performance.now()-started;this.metrics.checkpointMaxMs=Math.max(this.metrics.checkpointMaxMs,this.metrics.checkpointMs);
     this.pending=[];this.pendingEvents=[];this.dirty.clear();
     for(const [id,r] of this.records)if(!['active','queued'].includes(r.status)){this.records.delete(id);this.samplers.delete(id);}
@@ -293,6 +345,21 @@ class Engine{
     return {points:rows.slice(0,count).map(p=>({...p,...U.telemetry(p,r.initial.calibration||U.SCALE)})),nextCursor:rows.length>count?rows[count-1].seq:null,cutoffTick:to,cutoffSeq,trajectoryCoverage,sampling:r.sampling||{version:'legacy-linear-prediction-v1'},
       calibration:r.initial.calibration||U.SCALE,calibrationInferred:!r.initial.calibration};
   }
+  bodyTrajectory(userId,worldId,id){
+    const field=this.ensureBodyField(userId,worldId);
+    if(!field)fail(404,'当前地图没有多体轨迹');
+    this.checkpoint();
+    const result=this.bodyFields.trajectory(field,id);
+    if(!result)fail(404,'找不到该天体');
+    return result;
+  }
+  bodyFrame(userId,worldId,tick){
+    const field=this.ensureBodyField(userId,worldId);
+    if(!field)fail(404,'当前地图没有多体轨迹');
+    if(!Number.isFinite(tick)||tick<0)fail(422,'无效的天体回放时间');
+    if(field.tracks.length)this.checkpoint();
+    return this.bodyFields.historyFrame(field,tick);
+  }
   terminate(userId,id,{checkpoint=true}={}){
     const r=this.owned(userId,id);if(!['active','queued'].includes(r.status))return this.publicRecord(r);
     this.records.set(id,r);r.state.event={type:'terminated',substepFraction:0};
@@ -307,22 +374,69 @@ class Engine{
     for(const id of unique){const record=this.owned(userId,id);if((record.worldId??null)!==(worldId??null)||(record.initial.dimension??2)!==dimension)fail(404,'当前地图中找不到该卫星');}
     const satellites=unique.map(id=>this.terminate(userId,id,{checkpoint:false}));this.checkpoint();return {satellites,server:this.health()};
   }
+  removeSatelliteRows(userId,ids){
+    const archives=[],exportIds=[];
+    const findArchives=this.db.prepare('SELECT file FROM trajectory_chunks WHERE satellite_id=?');
+    const findExports=this.db.prepare('SELECT id FROM exports WHERE satellite_id=?');
+    const removeChildren=['exports','events','points','trajectory_chunks'].map(table=>
+      this.db.prepare(`DELETE FROM ${table} WHERE satellite_id=?`));
+    const remove=this.db.prepare('DELETE FROM satellites WHERE id=? AND user_id=?');
+    for(const id of ids){
+      for(const row of findArchives.iterate(id))archives.push(row.file);
+      for(const row of findExports.iterate(id))exportIds.push(row.id);
+      for(const statement of removeChildren)statement.run(id);
+      const removed=remove.run(id,userId);
+      if(removed.changes!==1)fail(404,'找不到该卫星');
+    }
+    return {archives,exportIds};
+  }
+  forgetSatellites(ids){
+    for(const id of ids){this.records.delete(id);this.samplers.delete(id);this.dirty.delete(id);}
+  }
   deleteSatellite(userId,id){
     this.owned(userId,id);this.checkpoint();
-    const archives=this.db.prepare('SELECT file FROM trajectory_chunks WHERE satellite_id=?').all(id).map(row=>row.file);
-    const exportIds=this.db.prepare('SELECT id FROM exports WHERE satellite_id=?').all(id).map(row=>row.id);
-    this.transaction(()=>{
-      this.db.prepare('DELETE FROM exports WHERE satellite_id=?').run(id);
-      this.db.prepare('DELETE FROM events WHERE satellite_id=?').run(id);
-      this.db.prepare('DELETE FROM points WHERE satellite_id=?').run(id);
-      this.db.prepare('DELETE FROM trajectory_chunks WHERE satellite_id=?').run(id);
-      const removed=this.db.prepare('DELETE FROM satellites WHERE id=? AND user_id=?').run(id,userId);
-      if(removed.changes!==1)fail(404,'找不到该卫星');
-    });
-    this.records.delete(id);this.samplers.delete(id);this.dirty.delete(id);
+    const {archives,exportIds}=this.transaction(()=>this.removeSatelliteRows(userId,[id]));
+    this.forgetSatellites([id]);
     const archiveCleanupFailures=[];
     for(const file of archives)try{unlinkSync(archivePath(this.filename,file));}catch(error){if(error.code!=='ENOENT')archiveCleanupFailures.push(file);}
     return {id,exportIds,archiveCleanupFailures};
+  }
+  switchMap(userId,{fromWorldId,toWorldId,switchId}){
+    if(fromWorldId===undefined||toWorldId===undefined||typeof switchId!=='string'||
+      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(switchId))fail(422,'无效的地图切换请求');
+    const prior=this.db.prepare('SELECT * FROM map_switches WHERE user_id=? AND id=?').get(userId,switchId);
+    if(prior){
+      if(prior.from_world!==fromWorldId||prior.to_world!==toWorldId)fail(409,'切换请求已用于其他地图');
+      return {deleted:prior.deleted,cleanup:prior.cleanup&&JSON.parse(prior.cleanup)};
+    }
+    this.worldInfo(fromWorldId);this.worldInfo(toWorldId);
+    if(fromWorldId===toWorldId)return {deleted:0,cleanup:null};
+    this.checkpoint();
+    const ids=this.db.prepare(`SELECT s.id FROM satellites s LEFT JOIN satellite_worlds sw ON sw.satellite_id=s.id
+      WHERE s.user_id=? AND sw.world_id IS ? AND json_extract(s.record,'$.initial.dimension')=3`).all(userId,fromWorldId).map(row=>row.id);
+    const clockKey=spatialClockKey(userId,fromWorldId),previousClock=this.spatialClocks.get(clockKey);
+    // Reset the old map's pause without letting connected clients discard the new clock revision.
+    const clock=previousClock&&{offset:0,pausedAt:null,revision:previousClock.revision+1};
+    const cleanup=this.transaction(()=>{
+      const files=this.removeSatelliteRows(userId,ids);
+      this.bodyFields.deleteRows(userId,fromWorldId);
+      if(clock)this.sql.clock.run(clockKey,JSON.stringify(clock));
+      const work=ids.length||clock?{ids,...files}:null;
+      this.db.prepare('INSERT INTO map_switches VALUES (?,?,?,?,?,?)').run(userId,switchId,fromWorldId,toWorldId,ids.length,work&&JSON.stringify(work));
+      return work;
+    });
+    this.forgetSatellites(ids);
+    this.bodyFields.forget(userId,fromWorldId);
+    if(clock)this.spatialClocks.set(clockKey,clock);
+    return {deleted:ids.length,cleanup};
+  }
+  pendingMapSwitches(){
+    return this.db.prepare('SELECT user_id,id,from_world,cleanup FROM map_switches WHERE cleanup IS NOT NULL').all()
+      .map(row=>({userId:row.user_id,switchId:row.id,fromWorldId:row.from_world,cleanup:JSON.parse(row.cleanup)}));
+  }
+  finishMapSwitch(userId,switchId){
+    return this.db.prepare('UPDATE map_switches SET cleanup=NULL WHERE user_id=? AND id=? AND cleanup IS NOT NULL')
+      .run(userId,switchId).changes===1;
   }
   prepareExport(userId,id,format){
     if(!['csv','json'].includes(format))fail(422,'仅支持 CSV 和 JSON');

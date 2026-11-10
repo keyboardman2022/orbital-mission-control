@@ -1,0 +1,8 @@
+# Playable seed maps
+
+Add a play action to the existing preview. It registers the displayed seed and counts with the server and opens the standard mission console at `mission.html?worldId=<id>`. The console URL identifies the map on refresh. The classic console remains accessible at `mission.html`.
+
+1. **Persistence and routing.** `POST /api/worlds` accepts a seed and optional counts and persists the full generated map under a stable ID. `GET /api/model?worldId=` provides the stored configuration and its model. Seeded launches store a map ID. Paginated lists, active queries, SSE and map-wide sweep operations stay within that map. Existing records with no map ID belong to the classic map. Keep the same account and runtime clock.
+2. **Shared physics.** `OrbitalModel.createRuntime(world)` uses the generator's body positions at the simulation tick. Seeded black holes use the existing pseudo-Newtonian force law. Stars and planets use softened Newtonian gravity. Resolve collisions against each body's swept path and report the first impact. Bind server integration, export metadata and browser prediction to the stored map. Keep classic entry points and behavior.
+3. **Console.** Load the map before initializing the console. Show the seed, its bodies and orbits, with the existing stellar and black-hole renderers. Fit the map on entry and provide a safe default launch point and body-specific orbit estimates. Scope list and stream requests to the loaded map.
+4. **Verification.** First add failing tests for registration, impossible configuration, persistence, scoped launch/list/active/sweep, and a seeded collision. Verify the whole Node suite and enter a configured map in the browser to launch a satellite and reload its record.

@@ -22,9 +22,8 @@
   <header class="site-head">
     <span class="brand">ORBITAL <span>/ MISSION CONTROL</span></span>
     <nav>
-      <a id="seed-3d" href="seed-preview.html?dimension=3" aria-label="生成 3D 地图"><span class="wide-link-text">生成 3D 地图</span><span class="compact-link-text" aria-hidden="true">种子地图</span></a>
-      <a id="classic-3d" href="map-3d.html" hidden>经典地图</a>
-      <a id="back-to-2d" href="mission.html" aria-label="返回 2D 控制台"><span class="wide-link-text">返回 2D 控制台</span><span class="compact-link-text" aria-hidden="true">2D 星图</span></a>
+      <a id="seed-3d" href="seed-preview.html?from=classic" aria-label="生成 3D 地图"><span class="wide-link-text">生成 3D 地图</span><span class="compact-link-text" aria-hidden="true">种子地图</span></a>
+      <a id="classic-3d" href="map-3d.html" title="切换地图会清除当前地图的卫星、轨迹和导出" hidden>经典地图</a>
     </nav>
   </header>
   <nav class="mobile-map-nav" aria-label="任务快捷入口">
@@ -39,13 +38,31 @@
       <div class="flight-workspace" id="map-panel">
       <div class="map-column">
       <div class="map-navigation">
-        <label>观察范围<select id="system-select" disabled></select></label>
+        <label>星系定位<select id="system-select" disabled></select></label>
         <label>天体定位<select id="body-focus"><option value="">选择天体…</option></select></label>
         <div class="controls map-tools" aria-label="星图操作">
           <button type="button" data-map-tool="pan" aria-pressed="true">平移</button>
           <button type="button" data-map-tool="rotate" aria-pressed="false">旋转</button>
           <button type="button" data-map-tool="pick" aria-pressed="false">选择发射点</button>
         </div>
+        <details class="body-archive" id="body-archive" hidden>
+          <summary>天体历史轨迹</summary>
+          <div class="controls">
+            <select id="body-history-select" aria-label="选择要查看轨迹的天体"><option value="">选择天体</option></select>
+            <button id="body-history-load" type="button" disabled>查看轨迹</button>
+            <button id="body-history-close" type="button" hidden>返回实时</button>
+          </div>
+          <div id="body-history-scrub" hidden>
+            <label>历史时刻 <output id="body-history-time"></output>
+              <input id="body-history-timeline" type="range" min="0" max="0" step="any">
+            </label>
+            <div class="controls">
+              <button id="body-history-play" type="button" disabled>播放</button>
+              <label>播放速度 <select id="body-history-rate"><option value=".25">0.25×</option><option value="1" selected>1×</option><option value="4">4×</option><option value="16">16×</option></select></label>
+            </div>
+          </div>
+          <p class="note" id="body-history-status" role="status"></p>
+        </details>
       </div>
       <section class="stage" aria-label="可旋转的三维星图">
         <canvas id="scene" tabindex="0" aria-label="三维星图。左键拖动平移，右键拖动或用方向键旋转，滚轮或加减键缩放"></canvas>
@@ -61,7 +78,12 @@
         <div class="launch-heading">
           <h2>发射点</h2>
           <div class="launch-heading-actions">
-            <button id="play" type="button" disabled>暂停模拟</button>
+            <div class="simulation-controls">
+              <button id="play" type="button" disabled>暂停模拟</button>
+              <select id="simulation-rate" aria-label="模拟倍速" title="模拟倍速" disabled>
+                <option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option>
+              </select>
+            </div>
             <button id="locate-launch" type="button">定位发射点</button>
             <button id="launch-3d" type="submit" form="launch-form" disabled>发射卫星</button>
           </div>
@@ -179,7 +201,7 @@
         <div class="section-divider"></div>
         <h2>物理与观察范围</h2>
         <p class="note" id="observation-3d"></p>
-        <p class="note">黑洞引力计算计入卫星质量，恒星和行星的引力加速度与卫星质量无关。高速读数是模型坐标速度。</p>
+        <p class="note" id="mass-model-note">黑洞引力计算计入卫星质量，恒星和行星的引力加速度与卫星质量无关。高速读数是模型坐标速度。</p>
       </section>
     </div>
   </main>

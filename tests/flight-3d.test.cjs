@@ -316,3 +316,37 @@ test('new 3D worlds contain only the requested stars and black holes',()=>{
  }
  assert.throws(()=>generateWorld('stars-only',{...options,planets:3}),RangeError);
 });
+
+test('a hierarchical triple keeps both barycentres and distinct orbital planes in the flight model',()=>{
+ const options={layout:'spatial-v5',systems:2,blackHoles:0,stars:5};
+ const world=generateWorld('三星试飞',options);
+ assert.deepEqual(generateWorld('三星试飞',options),world);
+ assert.deepEqual(world.systems.map(system=>system.type).sort(),['binary','hierarchical-triple']);
+ const system=world.systems.find(candidate=>candidate.triple);
+ const runtime=M.createRuntime(world), ids=system.bodies.map(body=>body.id);
+ const tripleAt=tick=>ids.map(id=>runtime.stellarBodiesAtTick(tick,true).find(body=>body.id===id));
+ const axes=['x','y','z'];
+ const distance=(a,b)=>Math.hypot(...axes.map(axis=>a[axis]-b[axis]));
+ const centerOf=bodies=>Object.fromEntries(axes.map(axis=>[axis,
+  bodies.reduce((sum,body)=>sum+body.massSolar*body[axis],0)/bodies.reduce((sum,body)=>sum+body.massSolar,0)]));
+ const [a,b,c]=tripleAt(0);
+ assert.ok(a.orbit.angularSpeed>4*c.orbit.angularSpeed);
+ assert.equal(a.plane,b.plane);
+ const planeDot=a.plane.cosInclination*c.plane.cosInclination+a.plane.sinInclination*c.plane.sinInclination*
+  (a.plane.cosNode*c.plane.cosNode+a.plane.sinNode*c.plane.sinNode);
+ assert.ok(Math.acos(planeDot)>.3);
+ const innerDistance=distance(a,b),outerDistance=distance(centerOf([a,b]),c);
+ assert.ok(outerDistance>6*innerDistance);
+ assert.notEqual(tripleAt(24000)[2].z,c.z);
+ for(const tick of [0,24000,120000]){
+  const trio=tripleAt(tick), [first,second,outer]=trio;
+  assert.ok(trio.every(star=>distance(star,system)+star.radius<=system.extent));
+  assert.ok(Math.abs(distance(first,second)-innerDistance)<1e-8);
+  assert.ok(Math.abs(distance(centerOf([first,second]),outer)-outerDistance)<1e-8);
+  assert.ok(distance(centerOf(trio),system)<1e-8);
+ }
+ const hit=runtime.createState({...flight,dynamicsVersion:runtime.MODEL.dynamics.version,
+   position:{x:c.x,y:c.y,z:c.z}},{fieldTick:0});
+ runtime.step(hit);
+ assert.equal(hit.event.bodyId,c.id);
+});

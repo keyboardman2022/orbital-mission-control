@@ -51,7 +51,7 @@ internal static class OrbitalLauncher
 
         if (!noBrowser)
         {
-            try { Process.Start(new ProcessStartInfo(baseUrl + "/mission.html") { UseShellExecute = true }); }
+            try { Process.Start(new ProcessStartInfo(baseUrl + "/map-3d.html") { UseShellExecute = true }); }
             catch (Exception error) { return Fail("服务已经启动，但无法打开浏览器：" + error.Message, false); }
         }
         return 0;

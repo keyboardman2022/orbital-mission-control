@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>引力实验场 · ORBITAL</title>
+  <link rel="stylesheet" href="map-3d.css">
+  <link rel="stylesheet" href="gravity-lab.css">
+  <script src="camera.js" defer></script>
+  <script src="shared/world-generator.js" defer></script>
+  <script src="shared/nbody.js" defer></script>
+  <script src="gravity-lab.js" defer></script>
+</head>
+<body>
+  <header class="site-head">
+    <span class="brand">ORBITAL <span>/ GRAVITY LAB</span></span>
+    <nav><a id="lab-return" href="seed-preview.html">返回种子地图</a></nav>
+  </header>
+  <main class="lab">
+    <div class="lab-intro">
+      <div><p class="eyebrow">N-BODY EXPERIMENT / 01</p><h1>引力实验场</h1></div>
+      <p>从随机位置和速度开始，让天体靠相互引力决定接下来的轨迹。</p>
+    </div>
+    <div class="lab-layout">
+      <section class="lab-observation" aria-label="三维观测区">
+        <div class="stage lab-stage">
+          <canvas id="scene" tabindex="0" aria-label="三维天体视图，方向键旋转，加减键缩放，空格暂停"></canvas>
+          <div class="lab-hud">
+            <span id="lab-mode" class="lab-mode">模拟中</span>
+            <span>天体 <output id="lab-population">—</output></span>
+            <span>合并 <output id="lab-merges">0</output></span>
+            <span><output id="lab-time">0.0</output> 模拟秒</span>
+          </div>
+          <p class="lab-hint" id="lab-hint">左键平移 · 右键旋转 · 滚轮缩放</p>
+        </div>
+        <div class="lab-tools" aria-label="模拟与视图控制">
+          <button type="button" id="lab-play" class="lab-primary">暂停模拟</button>
+          <button type="button" id="lab-step" disabled>单步</button>
+          <label>倍率 <select id="lab-speed"><option value="1">1×</option><option value="3">3×</option><option value="6" selected>6×</option><option value="10">10×</option></select></label>
+          <button type="button" id="lab-fit">全景</button>
+          <label class="lab-check"><input type="checkbox" id="lab-trails" checked> 短轨迹</label>
+          <label class="lab-check"><input type="checkbox" id="lab-vectors"> 速度箭头</label>
+        </div>
+      </section>
+      <aside class="lab-inspector">
+        <section class="panel lab-panel" aria-labelledby="lab-setup-title">
+          <h2 id="lab-setup-title">初始条件</h2>
+          <form id="lab-form">
+            <label for="lab-seed">种子</label>
+            <input id="lab-seed" required maxlength="64" autocomplete="off" spellcheck="false">
+            <label for="lab-count">初始天体数</label>
+            <input id="lab-count" type="number" required min="2" max="48" value="24">
+            <div class="lab-form-actions">
+              <button class="lab-primary" type="submit">用此种子重跑</button>
+              <button type="button" id="lab-random">随机一局</button>
+            </div>
+            <p id="lab-error" class="lab-error" role="alert" hidden></p>
+          </form>
+          <p class="note" id="lab-initial-speed"></p>
+          <ul class="lab-legend" id="lab-legend" aria-label="当前天体分类"></ul>
+        </section>
+        <section class="panel lab-panel" aria-labelledby="lab-log-title">
+          <h2 id="lab-log-title">碰撞记录</h2>
+          <p class="note" id="lab-empty">还没有碰撞。天体接触后会合并。</p>
+          <ol class="lab-log" id="lab-log" aria-live="polite"></ol>
+          <p class="lab-model">采用三维牛顿引力和近距离软化。合并保留质量和动量。坐标与时间使用实验单位。</p>
+        </section>
+      </aside>
+    </div>
+  </main>
+</body>
+</html>

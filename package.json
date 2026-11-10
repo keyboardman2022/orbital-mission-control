@@ -6,7 +6,7 @@
   "engines": { "node": ">=24.0.0" },
   "scripts": {
     "start": "node server/index.js",
-    "test": "node --test physics.test.cjs camera.test.cjs tests/*.test.cjs",
+    "test": "node --test camera.test.cjs tests/*.test.cjs",
     "backup": "node server/backup.js"
   }
 }

@@ -1,4 +1,6 @@
 data/
+/data-v*/
+/.superpowers/
 backups/
 *.log
 node_modules/

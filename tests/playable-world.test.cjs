@@ -37,23 +37,38 @@ test('a playable map persists with its configuration and isolates satellite list
     assert.equal(response.status, status, JSON.stringify(data));
     return {response,data};
   }
-  const options = {systems:3,blackHoles:0,stars:6,planets:5};
+  const options = {systems:2,blackHoles:0,stars:8};
   const {data:map} = await request('/api/worlds',{seed:'云图',options},201);
   const {worldId,world} = map;
-  assert.equal(world.systems.length, 3);
-  assert.ok(world.systems.every(system => system.type === 'binary'));
-  assert.equal(world.systems.flatMap(system => system.bodies).filter(body => body.kind === 'planet').length, 5);
+  assert.ok(world.systems.every(system=>system.type==='procedural'));
+  assert.equal(world.systems.reduce((sum,system)=>sum+system.bodies.length,0),8);
+  assert.equal(world.layout, 'spatial-v8');
+  assert.ok(world.systems.every(system => system.bodies.every(body => body.kind === 'star')));
   assert.equal((await request('/api/worlds',{seed:'云图',options},201)).data.worldId, worldId);
-  await request('/api/worlds',{seed:'云图',options:{...options,stars:7}},422);
+  const {data:legacy} = await request('/api/worlds',{seed:'云图',options:{...options,stars:4,layout:'spatial-v4'}},201);
+  assert.notEqual(legacy.worldId,worldId);
+  await request('/api/worlds',{seed:'云图',options:{...options,stars:17}},422);
 
   const guest = await request('/api/session/guest',{});
   auth = {cookie:guest.response.headers.get('set-cookie').split(';')[0],'x-csrf-token':guest.data.csrfToken};
   const query = '?worldId=' + worldId;
   const {data:configuration} = await request('/api/model' + query);
-  const input = {name:'test',position:{x:330,y:0},massKg:1000,speed:25,directionDeg:90,idempotencyKey:'shared-launch-key'};
+  const {data:bodyList} = await request('/api/satellites' + query);
+  const bodyId=bodyList.server.bodyField.bodies[0].id;
+  const {data:bodyTrack}=await request('/api/worlds/body-trajectory'+query+'&bodyId='+bodyId);
+  assert.equal(bodyTrack.points[0].tick,0);
+  const {data:bodyFrame}=await request('/api/worlds/body-frame'+query+'&tick=0');
+  assert.ok(bodyFrame.bodies.some(body=>body.id===bodyId));
+  const input = {name:'test',dimension:3,position:{x:330,y:0,z:0},pitchDeg:0,massKg:1000,speed:25,directionDeg:90,idempotencyKey:'shared-launch-key'};
   const seeded = {...input,worldId,modelVersion:configuration.model.version,dynamicsVersion:configuration.model.dynamics.version};
   const {data:{satellite}} = await request('/api/satellites',seeded,201);
   assert.equal(satellite.worldId, worldId);
+  const legacyQuery = '?worldId=' + legacy.worldId;
+  const {data:{model:legacyModel}} = await request('/api/model'+legacyQuery);
+  const {data:{satellite:legacyFlight}} = await request('/api/satellites',{
+    ...seeded,worldId:legacy.worldId,modelVersion:legacyModel.version,dynamicsVersion:legacyModel.dynamics.version,
+    idempotencyKey:'legacy-map-launch-key'
+  },201);
   const {data:classic} = await request('/api/model');
   const classicInput = {...input,modelVersion:classic.model.version,dynamicsVersion:classic.model.dynamics.version};
   await request('/api/satellites',classicInput,409);
@@ -68,4 +83,14 @@ test('a playable map persists with its configuration and isolates satellite list
   app = await startServer({port:0,dataDir:dir});
   assert.deepEqual((await request('/api/model' + query)).data.world, world);
   assert.equal((await request('/api/satellites' + query)).data.satellites[0].id, satellite.id);
+  assert.deepEqual((await request('/api/model'+legacyQuery)).data.world,legacy.world);
+  const {data:legacyTrail} = await request('/api/satellites/'+legacyFlight.id+'/trajectory');
+  assert.equal(legacyTrail.points[0].kind,'birth');
+  assert.equal(legacyTrail.points[0].z,legacyFlight.initial.position.z);
+  const {data:paused}=await request('/api/simulation/pause'+query,{paused:true});
+  const {data:faster}=await request('/api/simulation/rate'+query,{rate:4});
+  assert.equal(faster.server.simulationRate,4);
+  assert.equal(faster.server.tick,paused.server.tick);
+  assert.equal(faster.server.paused,true);
+  await request('/api/simulation/rate'+query,{rate:3},422);
 });
