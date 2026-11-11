@@ -3,11 +3,23 @@
 (async () => {
   const $ = id => document.getElementById(id);
   const canvas = $('scene'), ctx = canvas.getContext('2d');
-  const worldId = new URLSearchParams(location.search).get('worldId');
+  const mapUrl=new URL(location.href),explicitWorld=mapUrl.searchParams.has('worldId');
+  const lastWorldKey='orbital.lastWorldId';
+  let rememberedWorld=null;
+  if(!explicitWorld){
+    try{
+      const stored=localStorage.getItem(lastWorldKey);
+      if(/^[a-f0-9]{64}$/.test(stored))rememberedWorld=stored;
+    }catch{}
+  }
+  let worldId=mapUrl.searchParams.get('worldId')||rememberedWorld;
   const units=OrbitalUnits,camera=OrbitalCamera;
-  const worldQuery=worldId?'worldId='+encodeURIComponent(worldId):'';
-  if(worldId){
-    $('seed-3d').href='seed-preview.html?'+worldQuery;
+  let worldQuery=worldId?'worldId='+encodeURIComponent(worldId):'';
+  function rememberWorld(id){
+    try{
+      if(id)localStorage.setItem(lastWorldKey,id);
+      else localStorage.removeItem(lastWorldKey);
+    }catch{}
   }
   let config, csrfToken='', stream, worker, previewTimer, previewToken=0, pendingLaunch;
   let connecting=false, sending=false, switchingClock=false, pageActive=true, online=false, userId='', identityBusy=false;
@@ -23,7 +35,19 @@
     if(!response.ok)throw Object.assign(new Error(data.error?.message||'计算服务暂不可用'),{status:response.status});
     return data;
   }
-  try{config=await api('/api/model'+(worldId?'?'+worldQuery:''));}
+  try{
+    if(rememberedWorld){
+      try{config=await api('/api/model?'+worldQuery);}
+      catch(error){
+        if(error.status!==404)throw error;
+        try{
+          if(localStorage.getItem(lastWorldKey)===rememberedWorld)rememberWorld(null);
+        }catch{}
+        worldId=null;worldQuery='';
+      }
+    }
+    config??=await api('/api/model'+(worldId?'?'+worldQuery:''));
+  }
   catch{
     $('map-context').textContent='星图加载失败';
     $('launch-status').textContent='请确认计算服务已启动，再重新连接。';
@@ -32,6 +56,14 @@
     $('reconnect-3d').onclick=()=>location.reload();
     return;
   }
+  if(worldId){
+    $('seed-3d').href='seed-preview.html?'+worldQuery;
+    rememberWorld(worldId);
+    if(!explicitWorld){
+      mapUrl.searchParams.set('worldId',worldId);
+      history.replaceState(history.state,'',mapUrl);
+    }
+  }else if(explicitWorld)rememberWorld(null);
   if (!ctx) {
     $('map-context').textContent = '当前浏览器无法绘制星图。';
     return;
@@ -1272,6 +1304,7 @@
     try{
       classicSwitchId??=crypto.randomUUID();
       await api('/api/worlds/switch',{fromWorldId:worldId,toWorldId:null,switchId:classicSwitchId});
+      rememberWorld(null);
       location.assign('map-3d.html');
     }catch(error){notice.textContent=error.message;switchingMap=false;updateLaunch();}
   };
