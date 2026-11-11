@@ -26,6 +26,9 @@ h1{font-size:clamp(28px,4vw,38px);letter-spacing:-.05em;line-height:1.12;margin:
 .body-archive .controls{margin-top:5px}
 .body-archive select{width:auto;max-width:100%}
 .body-archive input[type=range]{width:100%;accent-color:var(--cyan)}
+.body-history-collisions{position:relative;height:24px;margin:0 8px}
+.body-history-collisions button{position:absolute;top:0;transform:translateX(-50%);padding:0;width:24px;height:24px;border:0;background:transparent}
+.body-history-collisions button::after{content:"";display:block;width:8px;height:8px;margin:auto;border-radius:50%;background:#ffb37c}
 .body-archive p{margin:3px 0 0}
 .body-archive p:empty{display:none}
 .side-column{min-width:0}
@@ -70,7 +73,8 @@ output{float:right;color:var(--cyan)}
 .launch-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
 .launch-heading h2{font-size:16px;flex-shrink:0}
 .launch-heading-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}
-.simulation-controls{display:flex;gap:6px}
+.simulation-controls{display:flex;align-items:center;gap:6px}
+#actual-rate{min-width:5.5em;color:var(--muted);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .launch-velocity{margin-top:9px;margin-bottom:0}
 .launch-panel label{margin-top:6px}
 .launch-panel input:not([type=checkbox]),.launch-panel select{margin-top:3px}

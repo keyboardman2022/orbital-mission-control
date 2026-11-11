@@ -137,5 +137,45 @@
       }
     };
   }
-  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,createTrail,loadWindow,loadExact,mergeSnapshot,liveSegment,createLiveObserver};
+  function createBodyFrameObserver(){
+    let target=null,from=null,receivedAt=0,duration=200,paused=false,segments=[];
+    const position=(body,start,end,f)=>({...body,x:start.x+(end.x-start.x)*f,
+      y:start.y+(end.y-start.y)*f,z:start.z+(end.z-start.z)*f});
+    function sample(now){
+      if(!from)return target;
+      const f=Math.max(0,(now-receivedAt)/duration);
+      if(f>=1)return target;
+      if(f===0)return from;
+      const tick=from.tick+(target.tick-from.tick)*f,bodies=[];
+      for(const {body,start,end,birth,death} of segments){
+        if(tick<birth||tick>=death)continue;
+        const t=Math.max(0,Math.min(1,(tick-birth)/(death-birth)));
+        bodies.push(position(body,start,end,t));
+      }
+      return {tick,bodies};
+    }
+    function reset(){target=from=null;segments=[];paused=false;}
+    return {sample,reset,accept(frame,now,{paused:freeze=false}={}){
+      if(target&&frame.tick<target.tick)return;
+      if(!target||freeze){target=frame;from=null;segments=[];receivedAt=now;paused=freeze;return;}
+      if(frame.tick===target.tick){if(paused){receivedAt=now;paused=false;}return;}
+      from=sample(now);
+      duration=Math.max(75,Math.min(250,now-receivedAt));
+      target=frame;receivedAt=now;paused=false;
+      const previous=new Map(from.bodies.map(body=>[body.id,body]));
+      const catalog=new Map(frame.catalog.map(body=>[body.id,body]));
+      segments=frame.bodies.map(body=>{
+        const old=previous.get(body.id),event=catalog.get(body.id);
+        previous.delete(body.id);
+        return {body,start:old??event?.mergeOrigin??body,end:body,
+          birth:old?from.tick:Math.max(from.tick,event?.birthTick??frame.tick),death:frame.tick};
+      });
+      for(const body of previous.values()){
+        const event=catalog.get(body.id);
+        const merge=frame.catalog.find(entry=>entry.continuedFrom===body.id||entry.absorbedFrom===body.id);
+        segments.push({body,start:body,end:merge?.mergeOrigin??body,birth:from.tick,death:event?.endTick??frame.tick});
+      }
+    }};
+  }
+  return {MAX_POINTS,MAX_TICKS,lifecycle,windowRange,interpolate,createCache,createTrail,loadWindow,loadExact,mergeSnapshot,liveSegment,createLiveObserver,createBodyFrameObserver};
 });

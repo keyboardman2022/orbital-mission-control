@@ -56,6 +56,7 @@
             <label>历史时刻 <output id="body-history-time"></output>
               <input id="body-history-timeline" type="range" min="0" max="0" step="any">
             </label>
+            <div id="body-history-collisions" class="body-history-collisions" role="group" aria-label="碰撞时刻" hidden></div>
             <div class="controls">
               <button id="body-history-play" type="button" disabled>播放</button>
               <label>播放速度 <select id="body-history-rate"><option value=".25">0.25×</option><option value="1" selected>1×</option><option value="4">4×</option><option value="16">16×</option></select></label>
@@ -81,8 +82,9 @@
             <div class="simulation-controls">
               <button id="play" type="button" disabled>暂停模拟</button>
               <select id="simulation-rate" aria-label="模拟倍速" title="模拟倍速" disabled>
-                <option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option>
+                <option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option><option value="16">16×</option>
               </select>
+              <span id="actual-rate" title="根据服务端确认的步数估算">实际 —</span>
             </div>
             <button id="locate-launch" type="button">定位发射点</button>
             <button id="launch-3d" type="submit" form="launch-form" disabled>发射卫星</button>

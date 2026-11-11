@@ -57,6 +57,9 @@ test('a playable map persists with its configuration and isolates satellite list
   const bodyId=bodyList.server.bodyField.bodies[0].id;
   const {data:bodyTrack}=await request('/api/worlds/body-trajectory'+query+'&bodyId='+bodyId);
   assert.equal(bodyTrack.points[0].tick,0);
+  const detail='/api/worlds/body-trajectory'+query+'&bodyId='+bodyId+'&fromTick=0';
+  assert.deepEqual((await request(detail+'&toTick=0')).data.points,[bodyTrack.points[0]]);
+  await request(detail,undefined,422);
   const {data:bodyFrame}=await request('/api/worlds/body-frame'+query+'&tick=0');
   assert.ok(bodyFrame.bodies.some(body=>body.id===bodyId));
   const input = {name:'test',dimension:3,position:{x:330,y:0,z:0},pitchDeg:0,massKg:1000,speed:25,directionDeg:90,idempotencyKey:'shared-launch-key'};

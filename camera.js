@@ -30,6 +30,13 @@ const OrbitalCamera=(()=>{
     const x=Math.max(18,Math.min(width-100,view.cx)),y=Math.max(210,Math.min(height-230,view.cy));
     return {x,y,inView:x===view.cx&&y===view.cy,angle:Math.atan2(view.cy-y,view.cx-x)};
   }
+  function edgeMarker(dx,dy,width,height){
+    const cx=width/2,cy=height/2;
+    const margin=Math.min(10,cx/2,cy/2);
+    if(dx===0&&dy===0)dy=1;
+    const scale=Math.min((cx-margin)/Math.abs(dx),(cy-margin)/Math.abs(dy));
+    return {x:cx+dx*scale,y:cy+dy*scale};
+  }
   function toWorld(x,y,view){
     const dx=x-view.cx,dy=y-view.cy;
     return {x:(dx*cos+dy*sin)/view.scale,y:(-dx*sin+dy*cos)/(view.scale*tilt)};
@@ -98,6 +105,6 @@ const OrbitalCamera=(()=>{
       }
     };
   }
-  return {view,toWorld,toScreen,sphereSilhouette,orbitTarget,zoomAt,pan,followAt,originMarker,minimumZoom,MAX_ZOOM,zoomFromSlider,zoomToSlider,wheelZoom,createPinchGesture};
+  return {view,toWorld,toScreen,sphereSilhouette,orbitTarget,zoomAt,pan,followAt,originMarker,edgeMarker,minimumZoom,MAX_ZOOM,zoomFromSlider,zoomToSlider,wheelZoom,createPinchGesture};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalCamera;

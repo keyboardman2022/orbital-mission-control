@@ -32,7 +32,7 @@
   const MODEL = Object.freeze({
     version: world?'seeded-pw-2d-v1':'pw-2d-v3', mu: world?0:centralMu, rs: world?0:schwarzschildRadius, captureRadius: world?0:69.3,
     tickRate, step: 1 / tickRate, stars, launchReferenceVersion:1, simulationPauseVersion:1, launchPresetVersion:1,
-    simulationRates:Object.freeze([1,2,4,8]),
+    simulationRates:Object.freeze([1,2,4,8,16]),
     dynamics: Object.freeze(world?{version:dynamic?'seeded-nbody-v1':'seeded-multi-attractor-v1',maxMassKg:1e30,
       referenceFrame:'world origin; +Y up',approximation:dynamic?'softened Newtonian interacting celestial bodies and passive satellites':'prescribed body orbits, PW black holes and softened Newtonian stars and planets'
     }:{version:'multi-attractor-pw-v1',legacyVersion:'two-body-pw-v1',maxMassKg:1e30,centralMassKg:units.centralMassKg,

@@ -59,9 +59,14 @@
 
   function contactTime(a,b,limit) {
     const x=b.x-a.x,y=b.y-a.y,z=b.z-a.z;
-    const gap=x*x+y*y+z*z-(a.radius+b.radius)**2;
+    const radius=a.radius+b.radius;
+    const gap=x*x+y*y+z*z-radius**2;
     if (gap<=0) return 0;
     const vx=b.vx-a.vx,vy=b.vy-a.vy,vz=b.vz-a.vz;
+    // A separated axis cannot produce contact unless relative drift can close it.
+    const reach=radius*(1+1e-12);
+    if(Math.abs(x)>reach+Math.abs(vx)*limit||Math.abs(y)>reach+Math.abs(vy)*limit||
+      Math.abs(z)>reach+Math.abs(vz)*limit)return Infinity;
     const closing=x*vx+y*vy+z*vz;
     if (closing>=0) return Infinity;
     const discriminant=closing*closing-gap*(vx*vx+vy*vy+vz*vz);

@@ -4,11 +4,34 @@ const Generator=require('../shared/world-generator.js');
 const {createSimulation}=require('../shared/nbody.js');
 
 const SAMPLE_TICKS=480;
+const DETAIL_WINDOW_SAMPLES=2048;
+const DETAIL_WINDOW_TICKS=SAMPLE_TICKS*DETAIL_WINDOW_SAMPLES;
 const RATE=Model.MODEL.tickRate;
 const key=(userId,worldId)=>`${userId}:${worldId}`;
 const point=(body,tick)=>({tick,x:body.x,y:body.y,z:body.z,vx:body.vx,vy:body.vy,vz:body.vz});
 const meta=(body,birthTick)=>({id:body.id,name:body.name,kind:body.kind,color:body.color,...(body.bodyClass?{bodyClass:body.bodyClass}:{}),
   radius:body.radius,massSolar:body.mass,systemId:body.systemId,birthTick,endTick:null});
+
+function moreMassive(first,second){
+  if(first.massSolar!==second.massSolar)return first.massSolar>second.massSolar?first:second;
+  return first.id<second.id?first:second;
+}
+
+function restoreCollisionLinks(catalog){
+  // Older archives have exact birth and end times but no parent links.
+  const births=new Map(),ends=new Map();
+  for(const body of catalog.values()){
+    if(body.id.startsWith('merged-'))births.set(body.birthTick,[...(births.get(body.birthTick)??[]),body]);
+    if(body.endTick!=null)ends.set(body.endTick,[...(ends.get(body.endTick)??[]),body]);
+  }
+  for(const [tick,results] of births){
+    const parents=ends.get(tick);
+    if(results.length!==1||parents?.length!==2)continue;
+    const [result]=results;
+    result.continuedFrom??=moreMassive(...parents).id;
+    result.absorbedFrom??=parents.find(parent=>parent.id!==result.continuedFrom)?.id;
+  }
+}
 
 function initialBodies(world){
   return world.systems.flatMap(system=>Generator.bodyPositions(system).map(({initial,orbit,massSolar,...body})=>
@@ -22,16 +45,21 @@ function createField(userId,worldId,world,saved){
   });
   let tick=saved?.tick??0,seen=0,dirty=!saved;
   const tracks=[],catalog=new Map(saved?.catalog?.map(body=>[body.id,body])??sim.bodies.map(body=>[body.id,meta(body,0)]));
+  if(saved)restoreCollisionLinks(catalog);
   const frames=new Map();
   function frame(){
-    frames.set(tick,sim.bodies.map(body=>({...body})));
+    let bodies=frames.get(tick);
+    if(bodies)return bodies;
+    bodies=sim.bodies.map(body=>({...body}));
+    frames.set(tick,bodies);
     if(frames.size>4)frames.delete(frames.keys().next().value);
+    return bodies;
   }
   const sample=(body,at)=>tracks.push({id:body.id,...point(body,at)});
-  frame();
   if(!saved)for(const body of sim.bodies)sample(body,0);
-  function advanceTo(target){
+  function advanceTo(target,retainPrevious=false){
     while(tick<target){
+      if(retainPrevious)frame();
       sim.step(1/RATE);tick++;dirty=true;
       for(;seen<sim.collisions.length;seen++){
         const {first,second,result,time}=sim.collisions[seen];
@@ -40,21 +68,23 @@ function createField(userId,worldId,world,saved){
           catalog.get(body.id).endTick=at;
           sample(body,at);
         }
-        catalog.set(result.id,meta(result,at));sample(result,at);
+        const survivor=moreMassive(catalog.get(first.id),catalog.get(second.id));
+        const absorbed=survivor.id===first.id?second:first;
+        const {x,y,z}=result;
+        catalog.set(result.id,{...meta(result,at),continuedFrom:survivor.id,absorbedFrom:absorbed.id,mergeOrigin:{x,y,z}});sample(result,at);
       }
       if(tick%SAMPLE_TICKS===0)for(const body of sim.bodies)sample(body,tick);
-      frame();
     }
   }
   function at(time){
-    const start=frames.get(Math.floor(time))??frames.get(tick);
+    const start=frames.get(Math.floor(time))??frame();
     if(Number.isInteger(time))return start;
     const fraction=(time-Math.floor(time))/RATE;
     return start.map(body=>({...body,x:body.x+body.vx*fraction,y:body.y+body.vy*fraction,z:body.z+body.vz*fraction}));
   }
   return {userId,worldId,tracks,catalog,advanceTo,at,runtime:Model.createRuntime(world,at),
     get tick(){return tick;},get dirty(){return dirty;},
-    snapshot:()=>({tick,nextId:sim.nextId,bodies:frames.get(tick),catalog:[...catalog.values()]}),
+    snapshot:()=>({tick,nextId:sim.nextId,bodies:frame(),catalog:[...catalog.values()]}),
     serialize:()=>({tick,time:sim.time,nextId:sim.nextId,bodies:sim.bodies,catalog:[...catalog.values()]}),
     committed(){dirty=false;tracks.length=0;}
   };
@@ -94,25 +124,60 @@ class BodyFields{
     }
   }
   committed(){for(const field of this.fields.values())field.committed();}
-  trajectory(field,id){
+  trajectory(field,id,range){
     const body=field.catalog.get(id);
     if(!body)return null;
-    const scope=[field.userId,field.worldId,id];
-    const stride=Math.max(1,Math.ceil((field.tick-body.birthTick)/SAMPLE_TICKS/1400))*SAMPLE_TICKS;
-    const points=this.db.prepare(`SELECT tick,x,y,z,vx,vy,vz FROM body_tracks
-      WHERE user_id=? AND world_id=? AND body_id=? AND (tick=? OR tick=? OR (tick=CAST(tick AS INTEGER) AND CAST(tick AS INTEGER)%?=0)) ORDER BY tick`)
-      .all(...scope,body.birthTick,body.endTick,stride);
-    const live=field.at(field.tick).find(item=>item.id===id);
+    const continuations=new Map(),absorptions=new Map();
+    for(const segment of field.catalog.values()){
+      if(segment.continuedFrom)continuations.set(segment.continuedFrom,segment);
+      if(segment.absorbedFrom)absorptions.set(segment.absorbedFrom,segment);
+    }
+    const segments=[];
+    for(let segment=body;segment;segment=continuations.get(segment.id))segments.push(segment);
+    if(range){
+      const readRange=this.db.prepare(`SELECT tick,x,y,z,vx,vy,vz FROM body_tracks
+        WHERE user_id=? AND world_id=? AND body_id=? AND tick BETWEEN ? AND ? ORDER BY tick`);
+      const points=segments.flatMap(segment=>readRange.all(field.userId,field.worldId,segment.id,range.fromTick,range.toTick));
+      return {points};
+    }
+    const last=segments.at(-1);
+    const stride=Math.max(1,Math.ceil(((last.endTick??field.tick)-body.birthTick)/DETAIL_WINDOW_TICKS))*SAMPLE_TICKS;
+    const readPoints=this.db.prepare(`SELECT tick,x,y,z,vx,vy,vz FROM body_tracks
+      WHERE user_id=? AND world_id=? AND body_id=? AND (tick=? OR tick=? OR (tick=CAST(tick AS INTEGER) AND CAST(tick AS INTEGER)%?=0)) ORDER BY tick`);
+    const points=segments.flatMap(segment=>readPoints.all(field.userId,field.worldId,segment.id,segment.birthTick,segment.endTick,stride));
+    const live=field.at(field.tick).find(item=>item.id===last.id);
     if(live&&points.at(-1)?.tick!==field.tick)points.push(point(live,field.tick));
-    return {body,points};
+    const originalId=segmentId=>{
+      let segment=field.catalog.get(segmentId);
+      while(segment?.continuedFrom)segment=field.catalog.get(segment.continuedFrom);
+      return segment?.id??null;
+    };
+    const birthPosition=this.db.prepare('SELECT x,y,z FROM body_tracks WHERE user_id=? AND world_id=? AND body_id=? AND tick=?');
+    const waveFor=result=>{
+      if(!result)return null;
+      const origin=result.mergeOrigin??birthPosition.get(field.userId,field.worldId,result.id,result.birthTick);
+      return origin?{origin:{...origin},radius:result.radius}:null;
+    };
+    const collisionEvents=segments.slice(1).map(segment=>({
+      tick:segment.birthTick,otherBodyId:originalId(segment.absorbedFrom),absorbed:false,wave:waveFor(segment)
+    }));
+    const contactFrame=last.endTick==null?null:this.historyFrame(field,last.endTick,{atContact:true});
+    if(contactFrame){
+      const result=absorptions.get(last.id);
+      collisionEvents.push({tick:last.endTick,otherBodyId:originalId(result?.continuedFrom),absorbed:true,wave:waveFor(result)});
+    }
+    const collisions=[...new Set(collisionEvents.map(event=>event.tick))];
+    return {body:{...body,endTick:last.endTick},points,segments,collisions,collisionEvents,
+      detailWindowTicks:stride>SAMPLE_TICKS?DETAIL_WINDOW_TICKS:0,...(contactFrame&&{contactFrame})};
   }
-  historyFrame(field,tick){
-    if(tick>=field.tick)return {tick:field.tick,bodies:field.at(field.tick)};
+  historyFrame(field,tick,{atContact=false}={}){
+    if(tick>=field.tick&&!atContact)return {tick:field.tick,bodies:field.at(field.tick)};
     const before=this.db.prepare(`SELECT tick,x,y,z,vx,vy,vz FROM body_tracks WHERE user_id=? AND world_id=? AND body_id=? AND tick<=? ORDER BY tick DESC LIMIT 1`);
     const after=this.db.prepare(`SELECT tick,x,y,z,vx,vy,vz FROM body_tracks WHERE user_id=? AND world_id=? AND body_id=? AND tick>=? ORDER BY tick LIMIT 1`);
     const bodies=[];
     for(const body of field.catalog.values()){
-      if(tick<body.birthTick||body.endTick!=null&&tick>=body.endTick)continue;
+      if(tick<body.birthTick||body.endTick!=null&&(tick>body.endTick||tick===body.endTick&&!atContact))continue;
+      if(atContact&&body.birthTick===tick&&body.id.startsWith('merged-'))continue;
       const args=[field.userId,field.worldId,body.id,tick];
       const a=before.get(...args);
       if(!a)continue;
@@ -125,4 +190,4 @@ class BodyFields{
   }
 }
 
-module.exports={BodyFields,initialBodies};
+module.exports={BodyFields,initialBodies,DETAIL_WINDOW_TICKS};

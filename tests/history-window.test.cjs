@@ -121,3 +121,34 @@ test('loadExact stops before dispatch when aborted',async()=>{
   await assert.rejects(history.loadExact(async()=>{calls++;return {points:[],nextCursor:null,cutoffSeq:9};},{cutoffSeq:9,signal:controller.signal}),error=>error.name==='AbortError');
   assert.equal(calls,0);
 });
+
+test('celestial display advances between confirmed frames without jumping on early or late arrivals',()=>{
+  const observer=history.createBodyFrameObserver();
+  const frame=(tick,x)=>({tick,bodies:[{id:'star',x,y:0,z:0}],catalog:[]});
+  const sample=at=>observer.sample(at).bodies[0].x;
+  observer.accept(frame(0,0),0);
+  observer.accept(frame(120,12),200);
+  assert.equal(sample(300),6);
+  observer.accept(frame(180,18),300);
+  assert.equal(sample(300),6);
+  assert.equal(sample(350),12);
+  assert.equal(sample(900),18);
+  observer.accept(frame(190,19),900);
+  assert.equal(sample(900),18);
+  observer.accept(frame(180,18),910);
+  assert.equal(sample(1200),19);
+  observer.accept(frame(200,20),1201,{paused:true});
+  assert.equal(sample(1201),20);
+});
+
+test('celestial display switches collision participants at the archived impact tick',()=>{
+  const observer=history.createBodyFrameObserver();
+  const body=(id,x)=>({id,x,y:0,z:0});
+  observer.accept({tick:0,bodies:[body('a',0),body('b',10)],catalog:[]},0);
+  observer.accept({tick:20,bodies:[body('merged',8)],catalog:[
+    {id:'a',endTick:10},{id:'b',endTick:10},{id:'merged',birthTick:10,mergeOrigin:{x:5,y:0,z:0}}
+  ]},200);
+  assert.deepEqual(observer.sample(299).bodies.map(item=>item.id),['a','b']);
+  assert.deepEqual(observer.sample(300).bodies,[body('merged',5)]);
+  assert.deepEqual(observer.sample(400).bodies,[body('merged',8)]);
+});

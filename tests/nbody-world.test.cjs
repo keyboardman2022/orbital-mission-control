@@ -43,29 +43,59 @@ test('seeded body motion is account scoped, survives restart and ignores satelli
   assert.equal(snapshot(b).tick,960);
 });
 
-test('a celestial collision leaves both original tracks and starts a new track for the merged body',t=>{
+test('a collision ends the smaller body’s history and continues the larger body’s track',t=>{
   const engine=new Engine({filename:':memory:'});
   t.after(()=>engine.close());
   const user=engine.guest().user.id,worldId='a'.repeat(64);
-  const body=(id,x,vx)=>({id,kind:'star',name:id,color:'#abcdef',radius:10,massSolar:.3,orbit:null,
+  const body=(id,x,vx,massSolar)=>({id,kind:'star',name:id,color:'#abcdef',radius:10,massSolar,orbit:null,
     initial:{x,y:0,z:0,vx,vy:0,vz:0}});
   const world={version:'seeded-systems-v1',seed:'impact',radius:90000,layout:'spatial-v7',motion:'nbody-v1',systems:[
-    {id:'s',type:'procedural',x:0,y:0,z:0,extent:150,bodies:[body('a',-100,400),body('b',100,-400)]}
+    {id:'s',type:'procedural',x:0,y:0,z:0,extent:150,bodies:[body('a',-100,400,.25),body('b',100,-400,.5)]}
   ]};
   engine.db.prepare('INSERT INTO worlds VALUES (?,?)').run(worldId,JSON.stringify(world));
   engine.active(user,worldId,3);
   engine.advanceTo(300);
   const state=engine.active(user,worldId,3).server.bodyField;
   assert.deepEqual(state.bodies.map(body=>body.id),['merged-1']);
-  assert.equal(state.bodies[0].mass,.6);
+  assert.equal(state.bodies[0].mass,.75);
+  assert.equal(state.catalog.find(body=>body.id==='merged-1').continuedFrom,'b');
   const a=engine.bodyTrajectory(user,worldId,'a'),b=engine.bodyTrajectory(user,worldId,'b');
   const merged=engine.bodyTrajectory(user,worldId,'merged-1');
-  assert.equal(a.body.endTick,b.body.endTick);
+  assert.equal(b.body.endTick,null);
+  assert.deepEqual(b.collisions,[a.body.endTick]);
+  assert.deepEqual(a.collisions,[a.body.endTick]);
+  const {x,y,z}=merged.points[0];
+  const wave={origin:{x,y,z},radius:merged.body.radius};
+  assert.deepEqual(a.collisionEvents,[{tick:a.body.endTick,otherBodyId:'b',absorbed:true,wave}]);
+  assert.deepEqual(b.collisionEvents,[{tick:a.body.endTick,otherBodyId:'a',absorbed:false,wave}]);
+  assert.deepEqual(state.catalog.find(body=>body.id==='merged-1').mergeOrigin,wave.origin);
+  assert.deepEqual(b.segments.map(body=>body.id),['b','merged-1']);
+  assert.deepEqual(b.points.filter(point=>point.tick>a.body.endTick),merged.points.slice(1));
   assert.equal(a.points.at(-1).tick,merged.points[0].tick);
+  const contactTick=Math.floor(a.body.endTick);
+  const detail=engine.bodyTrajectory(user,worldId,'b',{fromTick:contactTick,toTick:contactTick+1});
+  assert.deepEqual(detail.points,b.points.filter(point=>point.tick>=contactTick&&point.tick<=contactTick+1));
+  assert.equal(detail.points.length,2);
+  assert.throws(()=>engine.bodyTrajectory(user,worldId,'b',{fromTick:0,toTick:1e8}),{status:422});
   assert.equal(merged.body.birthTick,merged.points[0].tick);
-  assert.ok(Math.abs(a.points.at(-1).x-b.points.at(-1).x-(-20))<1e-8);
+  const largeAtContact=b.points.find(point=>point.tick===a.body.endTick);
+  assert.ok(Math.abs(a.points.at(-1).x-largeAtContact.x-(-20))<1e-8);
+  assert.equal(a.contactFrame.tick,a.body.endTick);
+  assert.deepEqual(a.contactFrame.bodies.map(body=>body.id),['a','b']);
+  assert.deepEqual(a.contactFrame.bodies.map(body=>body.x),[a.points.at(-1).x,largeAtContact.x]);
+  assert.equal(b.contactFrame,undefined);
+  assert.equal(merged.contactFrame,undefined);
   assert.deepEqual(engine.bodyFrame(user,worldId,0).bodies.map(body=>body.id),['a','b']);
   assert.deepEqual(engine.bodyFrame(user,worldId,merged.body.birthTick+1).bodies.map(body=>body.id),['merged-1']);
+
+  const legacy=engine.bodyFields.get(user,worldId).serialize();
+  legacy.catalog=legacy.catalog.map(({continuedFrom,absorbedFrom,mergeOrigin,...body})=>body);
+  engine.bodyFields.forget(user,worldId);
+  engine.bodyFields.open(user,worldId,world,legacy);
+  const restored=engine.bodyTrajectory(user,worldId,'b');
+  assert.deepEqual(restored.points,b.points);
+  assert.deepEqual(restored.collisionEvents,b.collisionEvents);
+  assert.deepEqual(engine.bodyTrajectory(user,worldId,'a').collisionEvents,a.collisionEvents);
 });
 
 test('simulation speed advances bodies and satellites together without changing the path or other accounts',t=>{
@@ -81,13 +111,13 @@ test('simulation speed advances bodies and satellites together without changing 
     speed:5,directionDeg:90,massKg:1000,dynamicsVersion:'seeded-nbody-v1',idempotencyKey:'timed-probe'};
   const fast=engine.launch(a,input),slow=engine.launch(b,input);
   assert.throws(()=>engine.setSpatialRate(a,worldId,3),{status:422});
-  assert.equal(engine.setSpatialRate(a,worldId,8).server.tick,0);
-  engine.advanceTo(60);
+  assert.equal(engine.setSpatialRate(a,worldId,16).server.tick,0);
+  engine.advanceTo(30);
   assert.equal(clock(a).tick,480);
   assert.equal(clock(a).bodyField.tick,480);
   assert.equal(engine.get(a,fast.id).state.fieldTick,480);
-  assert.equal(clock(b).tick,60);
-  assert.equal(engine.get(b,slow.id).state.fieldTick,60);
+  assert.equal(clock(b).tick,30);
+  assert.equal(engine.get(b,slow.id).state.fieldTick,30);
   const saved=engine.get(a,fast.id).state;
   engine.setSpatialPaused(a,worldId,true);
   assert.equal(engine.setSpatialRate(a,worldId,4).server.tick,480);

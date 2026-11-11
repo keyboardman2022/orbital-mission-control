@@ -4,7 +4,7 @@ const {randomUUID,randomBytes,createHash}=require('node:crypto');
 const M=require('../shared/simulation.js');
 const U=require('../shared/units.js');
 const {generateWorld,N_BODY_MOTION}=require('../shared/world-generator.js');
-const {BodyFields}=require('./body-fields.js');
+const {BodyFields,DETAIL_WINDOW_TICKS}=require('./body-fields.js');
 const {createSampler,POLICY}=require('./trajectory-sampler.js');
 const Budget=require('./trajectory-budget.js');
 const {initializeStore,readPoints,archiveBatch,archivePath}=require('./trajectory-store.js');
@@ -287,12 +287,14 @@ class Engine{
       const clock=r.initial.dimension===3?this.spatialClocks.get(spatialClockKey(r.ownerId,r.worldId)):undefined;
       schedule(flights,r,clock);
     }
+    const flightRuntimes=new Set(flights.map(({item})=>this.recordRuntimes.get(item)));
+    for(const work of fields)work.retainPrevious=flightRuntimes.has(work.item.runtime);
     let liveFlights=flights.length;
     while(this.tick<target&&steps<maxSteps&&performance.now()-started<budgetMs){
       if(!liveFlights&&!fields.length){this.tick=target;break;}
       // Advance each celestial field immediately before the matching satellite step.
       for(let round=0;round<rounds;round++){
-        for(const {item:field,rate} of fields)if(round<rate)field.advanceTo(field.tick+1);
+        for(const {item:field,rate,retainPrevious} of fields)if(round<rate)field.advanceTo(field.tick+1,retainPrevious);
         for(const {item:r,rate} of flights){
           if(round>=rate||r.status!=='active')continue;
           const sampler=this.ensureSampler(r);(this.recordRuntimes.get(r)??M).step(r.state);this.metrics.rawSteps++;if(sampler)sampler.push(M.snapshot(r.state));this.dirty.add(r.id);
@@ -345,11 +347,18 @@ class Engine{
     return {points:rows.slice(0,count).map(p=>({...p,...U.telemetry(p,r.initial.calibration||U.SCALE)})),nextCursor:rows.length>count?rows[count-1].seq:null,cutoffTick:to,cutoffSeq,trajectoryCoverage,sampling:r.sampling||{version:'legacy-linear-prediction-v1'},
       calibration:r.initial.calibration||U.SCALE,calibrationInferred:!r.initial.calibration};
   }
-  bodyTrajectory(userId,worldId,id){
+  bodyTrajectory(userId,worldId,id,range){
+    if(range){
+      const fromTick=integer(range.fromTick,null),toTick=integer(range.toTick,null);
+      if(fromTick==null||toTick==null||toTick<fromTick||toTick-fromTick>DETAIL_WINDOW_TICKS){
+        fail(422,'无效的天体轨迹时间范围');
+      }
+      range={fromTick,toTick};
+    }
     const field=this.ensureBodyField(userId,worldId);
     if(!field)fail(404,'当前地图没有多体轨迹');
-    this.checkpoint();
-    const result=this.bodyFields.trajectory(field,id);
+    if(!range||field.tracks.length)this.checkpoint();
+    const result=this.bodyFields.trajectory(field,id,range);
     if(!result)fail(404,'找不到该天体');
     return result;
   }

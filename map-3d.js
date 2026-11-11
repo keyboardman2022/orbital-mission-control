@@ -71,6 +71,10 @@
 
   const dynamic=config.world?.motion===OrbitalWorldGenerator.N_BODY_MOTION;
   let bodyFrame=null, archivedFrame=null, archiveRequest=null, bodyTrack=null, bodyTrackRequest=null;
+  const liveBodyObserver=dynamic?OrbitalHistory.createBodyFrameObserver():null;
+  const pendingLiveMerges=[];
+  let liveSample=null;
+  const liveBodyModel=dynamic?OrbitalModel.createRuntime(config.world,()=>liveSample?.bodies??null):null;
   const model=config.world?OrbitalModel.createRuntime(config.world,dynamic?tick=>{
     if(!bodyFrame)return null;
     const dt=Math.max(0,Math.min(.25*simulationRate,(tick-bodyFrame.tick)/OrbitalModel.MODEL.tickRate));
@@ -115,6 +119,8 @@
   let hiddenFlights=false, focusedBody='', mapTool='pan', launchDraft=null, launchPosition=null;
   let launchVisible=true, lastTelemetry=0;
   const impacts=[];
+  let mergeWaves=[];
+  const mergeWaveDuration=1.2;
   const liveTrail=[];
   let trailTick=-1;
   const systemLabels = new Map(world.systems.map((system, index) => [
@@ -152,6 +158,8 @@
   let pauseRevision=-1;
   let simulationRate=1;
   const rateControl=$('simulation-rate');
+  const actualRate=$('actual-rate');
+  let rateAnchor=null;
   let frozenFlights=new Map();
   const currentTick=()=>playing?serverTick+Math.max(0,performance.now()-tickSeen)/1000*model.MODEL.tickRate*simulationRate:frozenTick;
   const activeScope=()=>selected??{x:0,y:0,extent:world.radius};
@@ -161,52 +169,83 @@
     ? controls.replay.birthTick+controls.replay.time*model.MODEL.tickRate
     : currentTick();
   const bodiesAt=tick=>config.world?model.stellarBodiesAtTick(tick,true):[classicHole,...model.stellarBodiesAtTick(tick,true)];
+  function visibleBodies(tick){
+    if(!dynamic)return bodiesAt(tick);
+    liveSample=liveBodyObserver.sample(performance.now());
+    return liveBodyModel.stellarBodiesAtTick(liveSample?.tick??tick,true);
+  }
   const labels={star:'恒星',planet:'行星',moon:'天然卫星',blackHole:'黑洞','black-hole':'黑洞'};
   const bodyCount={};
   const blackHoleLabels=new Map();
-  const bodyLabels=new Map(),bodyHistorySelect=$('body-history-select');
+  const bodyLabels=new Map(),historyRoots=new Map(),bodyHistorySelect=$('body-history-select');
   const launchDial=$('launch-dial'),launchReference=$('launch-reference'),dialWheel=$('launch-dial-wheel');
   const dialModes=[...launchDial.querySelectorAll('[data-launch-axis]')];
   let launchOffset=null,dialOrigin,dialAxis='x',dialBearing=0,dialOffset=0,dialDrag;
   function rememberBody(body){
     if(bodyLabels.has(body.id))return;
     const kind=body.kind??'star';
-    bodyCount[kind]=(bodyCount[kind]??0)+1;
+    const root=historyRoots.get(body.continuedFrom)??body.id;
+    if(root===body.id)bodyCount[kind]=(bodyCount[kind]??0)+1;
     const profile=OrbitalWorldGenerator.BODY_PROFILES[body.bodyClass];
-    const label=labels[kind]+' '+bodyCount[kind]+(profile&&profile.label!==labels[kind]?' · '+profile.label:'');
+    const label=bodyLabels.get(root)??(labels[kind]+' '+bodyCount[kind]+(profile&&profile.label!==labels[kind]?' · '+profile.label:''));
+    historyRoots.set(body.id,root);
     bodyLabels.set(body.id,label);
     $('body-focus').add(new Option(label,body.id));
     if(kind==='blackHole')blackHoleLabels.set(body.id,label);
     const system=world.systems.find(item=>item.id===body.systemId||systemBodies.get(item.id).has(body.id));
     launchReference.add(new Option(`${config.world&&system?systemLabels.get(system.id).split(' · ')[0]+' · ':''}${label}`,body.id));
-    if(dynamic)bodyHistorySelect.add(new Option(label,body.id));
+    if(dynamic&&root===body.id)bodyHistorySelect.add(new Option(label,body.id));
   }
   function resetBodyChoices(){
     for(const kind of Object.keys(bodyCount))delete bodyCount[kind];
-    bodyLabels.clear();blackHoleLabels.clear();
+    bodyLabels.clear();blackHoleLabels.clear();historyRoots.clear();
     $('body-focus').options.length=1;launchReference.options.length=0;bodyHistorySelect.options.length=1;
     for(const body of bodiesAt(0))rememberBody(body);
     launchReference.value=launchSystem.bodies.find(body=>body.kind==='blackHole'||body.kind==='star').id;
   }
   resetBodyChoices();
   function acceptBodyFrame(field){
+    const previous=bodyFrame;
     bodyFrame=field;
+    // Body membership and history labels change only when a merge adds a catalog entry.
+    if(previous?.catalog.length===field.catalog.length)return;
     const active=new Set(field.bodies.map(body=>body.id));
-    for(const body of field.catalog)rememberBody(body);
+    const survivedCollisions=new Map();
+    for(const body of field.catalog){
+      if(previous&&body.mergeOrigin&&!bodyLabels.has(body.id)){
+        pendingLiveMerges.push({tick:body.birthTick,origin:body.mergeOrigin,radius:body.radius});
+      }
+      rememberBody(body);
+      if(body.continuedFrom){
+        const root=historyRoots.get(body.id);
+        survivedCollisions.set(root,(survivedCollisions.get(root)??0)+1);
+      }
+    }
+    const liveByRoot=new Map(field.bodies.map(body=>[historyRoots.get(body.id),body.id]));
     for(const option of [...$('body-focus').options,...launchReference.options]){
       if(option.value)option.disabled=!active.has(option.value);
     }
     for(const option of bodyHistorySelect.options){
-      if(option.value)option.textContent=bodyLabels.get(option.value)+(active.has(option.value)?'':' · 已合并');
+      if(!option.value)continue;
+      const parts=[bodyLabels.get(option.value)];
+      const absorbed=!liveByRoot.has(option.value);
+      const survived=survivedCollisions.get(option.value)??0;
+      const collisions=survived+Number(absorbed);
+      if(absorbed)parts.push('被合并');
+      if(collisions)parts.push(survived?`有碰撞记录（${collisions} 次）`:`碰撞 ${collisions} 次`);
+      option.textContent=parts.join(' · ');
     }
-    if(focusedBody&&!active.has(focusedBody))clearBodyFocus();
+    if(focusedBody&&!active.has(focusedBody)){
+      focusedBody=liveByRoot.get(historyRoots.get(focusedBody))??'';
+      $('body-focus').value=focusedBody;
+    }
     if(!active.has(launchReference.value)){
-      launchReference.value=field.bodies[0]?.id??'';
+      launchReference.value=liveByRoot.get(historyRoots.get(launchReference.value))??field.bodies[0]?.id??'';
       queueMicrotask(schedulePreview);
     }
   }
   function historicalBodies(tick){
-    const wanted=Math.max(0,Math.round(tick/60)*60);
+    const wanted=Math.max(0,(bodyTrack?Math.floor(tick/60):Math.round(tick/60))*60);
     if(archiveRequest?.tick!==wanted&&!(bodyTrack?.playing&&archiveRequest?.pending)){
       archiveRequest?.controller.abort();
       const controller=new AbortController();
@@ -253,7 +292,7 @@
     const extent=config.world?world.radius:scope.extent;
     const azimuthSin = Math.sin(yaw), azimuthCos = Math.cos(yaw);
     const elevationSin = Math.sin(pitch * radians), elevationCos = Math.cos(pitch * radians);
-    const view=camera.view(width,height,atZoom,bodyTrack?undefined:cameraOffset);
+    const view=camera.view(width,height,atZoom,bodyTrack?.offset??cameraOffset);
     const cameraSpace=point=>{
       const x=(point.x-center.x)/extent,y=(point.y-center.y)/extent;
       const z=((point.z??0)-(center.z??0))/extent;
@@ -268,6 +307,11 @@
       const scale=view.scale*3.6/distance;
       return {x:view.cx+horizontal*extent*scale,
         y:view.cy+vertical*extent*scale,scale,depth:3.6-distance};
+    };
+    const toEdge=(body,point)=>{
+      if(point)return camera.edgeMarker(point.x-width/2,point.y-height/2,width,height);
+      const {horizontal,vertical}=cameraSpace(body);
+      return camera.edgeMarker(horizontal,vertical,width,height);
     };
     function onPlane(px,py,heightKm){
       const z=(units.fromKm(heightKm)-(center.z??0))/extent;
@@ -287,7 +331,7 @@
       return {x:center.x+horizontal*azimuthCos+forward*azimuthSin,
         y:center.y+forward*azimuthCos-horizontal*azimuthSin,z:(center.z??0)-vertical*elevationCos};
     }
-    return {toScreen,onPlane,sphere,atFocalDepth,view:{...view,center,extent,
+    return {toScreen,toEdge,onPlane,sphere,atFocalDepth,view:{...view,center,extent,
       azimuth:[azimuthSin,azimuthCos],elevation:[elevationSin,elevationCos]}};
   }
 
@@ -389,32 +433,73 @@
     ctx.restore();
   }
 
+  function addMergeWave(wave,track){
+    if(!wave||reducedMotion.matches)return;
+    mergeWaves.push({...wave,track,age:0});
+    requestFrame();
+  }
+
+  function drawMergeWaves(projectSphere,toScreen){
+    for(const wave of mergeWaves){
+      if(wave.track!==bodyTrack||(!bodyTrack&&controls.replay))continue;
+      const progress=wave.age/mergeWaveDuration;
+      const outline=projectSphere(wave.origin,wave.radius*(1.05+12*progress));
+      if(!outline)continue;
+      ctx.save();
+      ctx.globalAlpha=.8*(1-progress);
+      if(outline.inside){
+        ctx.fillStyle='#ffb37c22';
+        ctx.fillRect(0,0,width,height);
+      }else{
+        const center=toScreen(wave.origin);
+        const minimum=8+30*progress;
+        const ring=outline.across<minimum&&center
+          ?{x:center.x,y:center.y,along:minimum,across:minimum,angle:0}:outline;
+        ctx.beginPath();
+        ctx.ellipse(ring.x,ring.y,ring.along,ring.across,ring.angle,0,TAU);
+        ctx.strokeStyle='#ffce99';
+        ctx.lineWidth=2;
+        ctx.shadowColor='#ff9b57';
+        ctx.shadowBlur=10;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
   function draw() {
     if (!width || !height) return;
-    const scope=activeScope(),replay=controls.replay;
+    const replay=controls.replay;
     const flight=satellites.get(selectedFlight);
     const shown=flightState(),tick=fieldTick();
     const historyTick=bodyTrack?bodyTrack.time*model.MODEL.tickRate:replay?tick:null;
-    const frameBodies=dynamic&&historyTick!==null?historicalBodies(historyTick):bodiesAt(tick);
+    const contactFrame=bodyTrack&&bodyTrack.time===bodyTrack.end?bodyTrack.contactFrame:null;
+    const frameBodies=contactFrame?contactFrame.bodies
+      :dynamic&&historyTick!==null?historicalBodies(historyTick):visibleBodies(tick);
+    if(historyTick!==null)pendingLiveMerges.length=0;
+    else while(pendingLiveMerges.length&&pendingLiveMerges[0].tick<=liveSample?.tick)
+      addMergeWave(pendingLiveMerges.shift(),null);
     const field=bodyTrack?[
-      ...frameBodies.filter(body=>body.id!==bodyTrack.body.id),
+      ...frameBodies.filter(body=>!bodyTrack.segmentIds.has(body.id)),
       {...bodyTrack.body,...bodyTrack.position}
     ]:frameBodies;
     if(!replay&&!bodyTrack&&launchVisible)updateLaunchPosition(field);
     const liveVisible=shown&&['active','escaped'].includes(shown.status);
-    const followed=focusedBody?field.find(body=>body.id===focusedBody):tracking&&!hiddenFlights&&(replay||liveVisible)?shown:null;
+    const followed=focusedBody?field.find(body=>body.id===focusedBody)
+      ??(!replay&&!bodyTrack&&field.find(body=>historyRoots.get(body.id)===historyRoots.get(focusedBody)))
+      :tracking&&!hiddenFlights&&(replay||liveVisible)?shown:null;
     if(followed)cameraTarget={x:followed.x,y:followed.y,z:followed.z??0};
-    const pivot=drag?.moved&&drag.pivot;
+    const pivot=!bodyTrack&&!followed&&drag?.moved&&drag.pivot;
     if(pivot?.id){
       const body=field.find(item=>item.id===pivot.id);
       if(body){
-        const center=cameraTarget??scope;
+        const center=cameraTarget??activeScope();
         cameraTarget={x:center.x+body.x-pivot.x,y:center.y+body.y-pivot.y,
           z:(center.z??0)+(body.z??0)-(pivot.z??0)};
         drag.pivot=body;
       }
     }
-    let {toScreen,sphere,view:spatialView}=projection();
+    let {toScreen,toEdge,sphere,view:spatialView}=projection();
     if(!bodyTrack&&$('auto-fit').checked&&shown&&!hiddenFlights){
       const point=toScreen(shown);
       if(point){
@@ -422,11 +507,10 @@
         const scale=Math.min(1,width*.40/Math.max(Math.abs(point.x-view.cx),1),
           height*.35/Math.max(Math.abs(point.y-view.cy),1));
         const nextZoom=Math.max(minZoom,zoom*scale);
-        if(nextZoom<zoom){zoom=nextZoom;syncZoom();({toScreen,sphere,view:spatialView}=projection());}
-        if(scale<1&&nextZoom===minZoom){cameraTarget=shown;({toScreen,sphere,view:spatialView}=projection());}
-      }else{cameraTarget=shown;({toScreen,sphere,view:spatialView}=projection());}
+        if(nextZoom<zoom){zoom=nextZoom;syncZoom();({toScreen,toEdge,sphere,view:spatialView}=projection());}
+        if(scale<1&&nextZoom===minZoom){cameraTarget=shown;({toScreen,toEdge,sphere,view:spatialView}=projection());}
+      }else{cameraTarget=shown;({toScreen,toEdge,sphere,view:spatialView}=projection());}
     }
-    const plane=(x,y)=>toScreen({x:scope.x+x*scope.extent,y:scope.y+y*scope.extent,z:scope.z??0});
     ctx.fillStyle = '#070c17';
     ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = '#afc7e6';
@@ -435,34 +519,19 @@
       ctx.fillRect(star.x * width, star.y * height, star.size, star.size);
     }
     ctx.globalAlpha = 1;
-    for (let index = -5; index <= 5; index++) {
-      const value = index / 5, color = index === 0 ? '#5373928c' : '#30496957';
-      path([plane(value,-1),plane(value,1)],color);
-      path([plane(-1,value),plane(1,value)],color);
-    }
-
-    const stars=[],markers=[];
-    if (config.world || !selected) {
-      for (const system of world.systems) {
-        const point=toScreen(system);
-        if(!point)continue;
-        if(system.z){
-          const foot=toScreen({...system,z:0});
-          ctx.setLineDash([2,4]);
-          path([foot,point],'#5373928c');
-          ctx.setLineDash([]);
-        }
-        ctx.font = '12px system-ui';
-        ctx.fillStyle = '#d4e4f6';
-        ctx.fillText(systemLabels.get(system.id), point.x + 15, point.y - 7);
-      }
-    }
+    const stars=[],markers=[],offscreen=[];
     for(const body of field){
       const point=toScreen(body);
-      if(!point)continue;
-      if(body.kind==='blackHole'){
-        const radius=body.rs*1.65*point.scale,reach=radius*4;
-        if(point.x+reach<0||point.x-reach>width||point.y+reach<0||point.y-reach>height)continue;
+      const blackHole=body.kind==='blackHole',planetRadius=planetRadii.get(body.id);
+      const appearance=point&&!blackHole&&planetRadius===undefined
+        ?OrbitalVisuals.stellarAppearance(point.scale,body,starDisplayScale):null;
+      const radius=point?(blackHole?body.rs*1.65*point.scale:appearance?.radius??planetRadius*point.scale):0;
+      const reach=Math.max(2,radius*(blackHole?4:appearance?2.8:1));
+      if(!point||point.x+reach<0||point.x-reach>width||point.y+reach<0||point.y-reach>height){
+        offscreen.push({point:toEdge(body,point),color:body.color??'#a4dba6'});
+        continue;
+      }
+      if(blackHole){
         if(radius>=.65){
           const scale=point.scale*body.rs/171;
           // Project the center in 3D and use the shared 2D disk orientation on screen.
@@ -471,8 +540,6 @@
         }
         if(radius<3)markers.push({point,radius:2,color:body.color??'#a4dba6',opacity:1});
       }else{
-        const appearance=planetRadii.has(body.id)?null:OrbitalVisuals.stellarAppearance(point.scale,body,starDisplayScale);
-        const radius=appearance?.radius??planetRadii.get(body.id)*point.scale;
         if(appearance)stars.push({...point,radius,appearance,star:body});
         else if(radius>=.65)dot(point,radius,body.color);
         const markerRadius=body.kind==='moon'?.75:body.kind==='planet'?1.1:starMarkerRadius;
@@ -528,6 +595,7 @@
       }
     }
     drawWave(sphere);
+    drawMergeWaves(sphere,toScreen);
     if(!bodyTrack&&flight&&shown&&!hiddenFlights&&(replay||liveVisible)){
       drawSatellite(toScreen(shown),flight,replay?'回放 / '+flight.name:flight.name);
     }
@@ -537,15 +605,45 @@
       if(point)drawLaunchMarker(point,'发射起点','#94f3e9');
     }
     if(bodyTrack){
+      const detail=bodyTrack.detail;
+      if(bodyTrack.detailWindowTicks){
+        const overviewEnd=detail?.[0].elapsedSeconds??bodyTrack.time;
+        ctx.fillStyle='#8af3e77a';
+        for(const sample of bodyTrack.points){
+          if(sample.elapsedSeconds>=overviewEnd)break;
+          const point=toScreen(sample);
+          if(point&&point.x>=0&&point.x<=width&&point.y>=0&&point.y<=height)ctx.fillRect(point.x,point.y,1.5,1.5);
+        }
+      }
       const trail=[];
-      for(const sample of bodyTrack.points){
+      for(const sample of detail??(bodyTrack.detailWindowTicks?[]:bodyTrack.points)){
         if(sample.elapsedSeconds>=bodyTrack.time)break;
         trail.push(toScreen(sample));
       }
       const marker=toScreen(bodyTrack.position);
       trail.push(marker);
       if(trail.length>1)path(trail,'#8af3e7b3',1.5);
-      if(marker)drawLaunchMarker(marker,'历史位置','#94f3e9');
+      const collision=bodyTrack.collisions.has(bodyTrack.time);
+      if(marker)drawLaunchMarker(marker,collision?'碰撞合并':'历史位置',collision?'#ffb37c':'#94f3e9');
+    }
+    for(const marker of offscreen){
+      const {x,y}=marker.point;
+      ctx.save();
+      ctx.translate(x,y);
+      ctx.rotate(Math.atan2(y-height/2,x-width/2));
+      ctx.beginPath();
+      ctx.moveTo(5,0);
+      ctx.lineTo(-4,-4);
+      ctx.lineTo(-2,0);
+      ctx.lineTo(-4,4);
+      ctx.closePath();
+      ctx.strokeStyle='#070c17';
+      ctx.lineWidth=2;
+      ctx.lineJoin='round';
+      ctx.stroke();
+      ctx.fillStyle=marker.color;
+      ctx.fill();
+      ctx.restore();
     }
     const overlay=$('stage-flight');
     overlay.hidden=bodyTrack||!flight||hiddenFlights;
@@ -591,8 +689,10 @@
         while(impacts.length&&visualTime-impacts[0].born>=2.4)impacts.shift();
       }
       controls.advance(dt);
+      for(const wave of mergeWaves)wave.age+=dt;
+      if(mergeWaves.length)mergeWaves=mergeWaves.filter(wave=>wave.age<mergeWaveDuration);
       if(bodyTrack?.playing){
-        seekBody(Math.min(bodyTrack.end,bodyTrack.time+dt*Number(bodyHistoryRate.value)));
+        seekBody(Math.min(bodyTrack.end,bodyTrack.time+dt*Number(bodyHistoryRate.value)),{playback:true});
         if(bodyTrack.time===bodyTrack.end)setBodyPlayback(false);
       }
     }
@@ -603,7 +703,7 @@
   }
   function requestFrame(){
     if(frame!==null||!pageActive||document.hidden)return;
-    if(playing||bodyTrack?.playing||controls.replay?.playing||controls.sweeping)frame=requestAnimationFrame(animate);
+    if(playing||bodyTrack?.playing||controls.replay?.playing||controls.sweeping||mergeWaves.length)frame=requestAnimationFrame(animate);
     else lastFrame=null;
   }
   function updatePlayback() {
@@ -617,13 +717,13 @@
     const scale=camera.view(width,height,zoom).scale;
     if(scale>0)$('map-scale').textContent=units.formatKm(units.toKm(90/scale))+' / 90 px（视图中心）';
   }
-  function updateCamera() {
+  function updateCamera(redraw=true) {
     if(pitch<-180||pitch>180)pitch=((pitch+180)%360+360)%360-180;
     zoom = Math.max(minZoom,Math.min(camera.MAX_ZOOM,zoom));
     $('pitch').value = Math.round(pitch);
     $('pitch-value').textContent = Math.round(pitch) + '°';
     syncZoom();
-    draw();
+    if(redraw)draw();
   }
   function fitZoom(){
     if(selected)return config.world?camera.minimumZoom(width,height,selected.extent)*.68:1.2;
@@ -651,7 +751,7 @@
   }
   selector.onchange = () => {
     selected = world.systems.find(system => system.id === selector.value);
-    $('stage-label').textContent = selected ? systemLabels.get(selected.id) : overviewLabel;
+    $('stage-label').textContent = selected ? '星系近景' : overviewLabel;
     setTracking(false);
     clearBodyFocus();
     $('auto-fit').checked=false;
@@ -664,7 +764,7 @@
     cameraOffset={x:0,y:0};zoom=fitZoom();
     updateCamera();
   };
-  $('stage-label').textContent = selected ? systemLabels.get(selected.id) : overviewLabel;
+  $('stage-label').textContent = selected ? '星系近景' : overviewLabel;
   function setPlaying(value){
     if(value===playing)return;
     if(!value){
@@ -695,6 +795,7 @@
   };
   $('reset').onclick = () => {
     if(config.world)selector.value='map';
+    if(bodyTrack)bodyTrack.offset={x:0,y:0};
     yaw=defaultYaw;pitch=defaultPitch;selector.onchange();
   };
   $('pitch').oninput = event => {pitch = Number(event.target.value); updateCamera();};
@@ -705,7 +806,7 @@
     canvas.dataset.tool=tool;
     const touchOnly=matchMedia('(max-width: 760px), (hover: none)').matches;
     const touchHint=touchOnly?' · 双指缩放':'';
-    $('map-hint').textContent=tool==='pick'?'点选当前 Z 平面上的发射点'+touchHint
+    $('map-hint').textContent=tool==='pick'?'点选当前 Z 平面上的发射点 · 拖动平移'+touchHint
       :tool==='rotate'?'拖动旋转'+(touchOnly?touchHint:' · 点「平移」返回默认操作')
       :touchOnly?'单指平移 · 双指缩放':'左键平移 · 右键旋转 · 滚轮缩放';
   }
@@ -722,12 +823,12 @@
     let underPointer,nearCenter;
     let pointerDistance=Infinity,centerDistance=Infinity;
     const centerSearchRadius=Math.min(width,height)*.24;
-    for(const body of bodiesAt(fieldTick())){
+    for(const body of visibleBodies(fieldTick())){
       const point=toScreen(body);
       if(!point)continue;
-      // The disk extends past the shadow and can still fill the view with its center offscreen.
+      // A black hole's disk can still be visible when its center is offscreen.
       const visualRadius=body.rs?body.rs*1.65*point.scale*3:planetRadii.has(body.id)
-        ? planetRadii.get(body.id)*point.scale:OrbitalVisuals.stellarAppearance(point.scale,body,starDisplayScale).radius;
+        ?planetRadii.get(body.id)*point.scale:OrbitalVisuals.stellarAppearance(point.scale,body,starDisplayScale).radius;
       const reach=body.rs?visualRadius:0;
       if(point.x+reach<0||point.x-reach>width||point.y+reach<0||point.y-reach>height)continue;
       const gap=Math.hypot(point.x-pointer.x,point.y-pointer.y);
@@ -747,8 +848,9 @@
     if(pinch.down(event)){canvas.setPointerCapture(event.pointerId);return;}
     if(drag||![0,1,2].includes(event.button))return;
     const primary=event.button===0&&!event.shiftKey;
+    const pick=!bodyTrack&&primary&&mapTool==='pick';
     drag = {id:event.pointerId,x:event.clientX,y:event.clientY,
-      primary,pan:event.button!==2&&(!primary||mapTool==='pan'),pick:primary&&mapTool==='pick',moved:false};
+      primary,pan:event.button!==2&&(!primary||mapTool!=='rotate'),pick,moved:false};
     if(!drag.pan&&!drag.pick)drag.pivot=rotationPivot(screenPoint(event));
     if(event.button!==0)event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
@@ -758,10 +860,10 @@
     if (drag?.id !== event.pointerId) return;
     const dx=event.clientX-drag.x,dy=event.clientY-drag.y;
     if(Math.abs(dx)+Math.abs(dy)>0)drag.moved=true;
-    if(drag.pick)return;
     if(drag.pan){
-      if(bodyTrack)return;
-      setTracking(false);clearBodyFocus();$('auto-fit').checked=false;cameraOffset.x+=dx;cameraOffset.y+=dy;
+      if(!bodyTrack){setTracking(false);clearBodyFocus();$('auto-fit').checked=false;}
+      const offset=bodyTrack?.offset??cameraOffset;
+      offset.x+=dx;offset.y+=dy;
     }
     else if(dx||dy){
       const nextYaw=yaw+dx*.009,nextPitch=pitch+dy*.28;
@@ -868,11 +970,23 @@
     }else if(pauseRevision>=0||server.tick<serverTick)return false;
     const rate=config.model.simulationRates?.includes(server.simulationRate)?server.simulationRate:1;
     const rateChanged=rate!==simulationRate;
+    const now=performance.now(),actualTick=server.bodyField?.tick??server.tick;
+    if(server.paused||rateChanged||!rateAnchor||!playing){
+      rateAnchor={tick:actualTick,at:now};
+      actualRate.textContent=server.paused?'实际 0×':'实际 —';
+    }else if(now-rateAnchor.at>=1200){
+      const effective=(actualTick-rateAnchor.tick)*1000/((now-rateAnchor.at)*model.MODEL.tickRate);
+      actualRate.textContent='实际 '+Math.max(0,effective).toFixed(1)+'×';
+      rateAnchor={tick:actualTick,at:now};
+    }
     if(rateChanged)lastFrame=null;
     simulationRate=rate;rateControl.value=String(rate);
-    if(dynamic&&server.bodyField)acceptBodyFrame(server.bodyField);
+    if(dynamic&&server.bodyField){
+      liveBodyObserver.accept(server.bodyField,now,{paused:server.paused});
+      acceptBodyFrame(server.bodyField);
+    }
     serverTick=server.tick;
-    tickSeen=performance.now();
+    tickSeen=now;
     if(typeof server.paused==='boolean'){
       if(server.paused)frozenTick=server.tick;
       const changed=playing===server.paused;
@@ -907,6 +1021,7 @@
     connection.onerror=()=>{
       if(!pageActive||stream!==connection)return;
       online=false;
+      rateAnchor=null;actualRate.textContent='实际 —';
       $('launch-status').textContent='实时连接中断 · 正在重连';
       $('reconnect-3d').hidden=false;
       updateLaunch();
@@ -969,8 +1084,9 @@
     hiddenFlights=false;locateFlight(flightState());canvas.scrollIntoView({block:'nearest'});
   };
   $('body-focus').onchange=event=>{
+    const id=event.target.value;
     closeBodyTrack(false);
-    const id=event.target.value,body=bodiesAt(fieldTick()).find(candidate=>candidate.id===id);
+    const body=(bodyTrack||controls.replay?bodiesAt(fieldTick()):visibleBodies(fieldTick())).find(candidate=>candidate.id===id);
     if(!body){clearBodyFocus();return;}
     const system=world.systems.find(candidate=>candidate.id===body.systemId||systemBodies.get(candidate.id).has(id));
     selector.value=system?.id??(config.world?'map':'classic');
@@ -992,28 +1108,134 @@
   };
   function closeBodyTrack(redraw=true){
     const hadTrack=Boolean(bodyTrack||bodyTrackRequest);
+    const liveView=bodyTrack?.liveView;
+    bodyTrack?.detailRequest?.abort();
     bodyTrackRequest?.abort();bodyTrackRequest=null;bodyTrack=null;
     if(!hadTrack)return;
     if(!controls.replay){archiveRequest?.controller.abort();archiveRequest=null;archivedFrame=null;}
     $('body-history-scrub').hidden=true;$('body-history-close').hidden=true;
     $('body-history-status').textContent='';
     $('body-history-load').disabled=!bodyHistorySelect.value;
-    if(redraw)draw();
+    if(liveView){
+      ({yaw,pitch,zoom,cameraTarget,cameraOffset,selected}=liveView);
+      drag=null;
+      selector.value=selected?.id??'map';
+      $('stage-label').textContent=selected?'星系近景':overviewLabel;
+      setTracking(liveView.trackedFlight===selectedFlight);
+      $('auto-fit').checked=liveView.autoFit;
+      const previousFocus=liveView.focusedBody;
+      if(previousFocus){
+        const root=historyRoots.get(previousFocus)??previousFocus;
+        focusedBody=bodiesAt(currentTick()).find(body=>(historyRoots.get(body.id)??body.id)===root)?.id??'';
+        $('body-focus').value=focusedBody;
+        if(!focusedBody){
+          cameraTarget=null;cameraOffset={x:0,y:0};zoom=fitZoom();
+        }
+      }
+      updateCamera(redraw);
+    }else if(redraw)draw();
   }
   const bodyTimeline=$('body-history-timeline'),bodyHistoryTime=$('body-history-time');
+  const bodyCollisionMarkers=$('body-history-collisions');
   const bodyHistoryPlay=$('body-history-play'),bodyHistoryRate=$('body-history-rate');
   function setBodyPlayback(playing){
     bodyTrack.playing=playing;
     bodyHistoryPlay.textContent=playing?'暂停':'播放';
     if(playing)requestFrame();
   }
-  function seekBody(time){
+  function updateBodyTrackPosition(track){
+    track.detail=track.detailSections.find(points=>points[0].elapsedSeconds<=track.time&&points.at(-1).elapsedSeconds>=track.time);
+    track.position=OrbitalHistory.interpolate(track.detail??track.points,track.time);
+  }
+  function combineBodyDetailPages(pages){
+    const sections=[];
+    let section;
+    for(const page of [...pages.values()].sort((a,b)=>a.fromTick-b.fromTick)){
+      if(!page.points.length)continue;
+      if(section&&page.fromTick<=section.toTick){
+        const lastTick=section.points.at(-1).tick;
+        section.points.push(...page.points.filter(point=>point.tick>lastTick));
+        section.toTick=Math.max(section.toTick,page.toTick);
+      }else{
+        section={toTick:page.toTick,points:[...page.points]};
+        sections.push(section.points);
+      }
+    }
+    return sections;
+  }
+  async function loadBodyDetail(track){
+    if(!track.detailWindowTicks||track.detailRequest)return;
+    const rate=model.MODEL.tickRate,tick=track.time*rate;
+    const pageSpan=track.detailWindowTicks/2,margin=Math.floor(pageSpan/8);
+    const activePage=Math.floor(tick/pageSpan)*pageSpan;
+    let page=activePage;
+    if(track.detailPages.has(page)){
+      if(!track.playing||tick<page+pageSpan-margin)return;
+      page+=pageSpan;
+    }
+    const endTick=track.points.at(-1).tick;
+    if(page>endTick||track.detailPages.has(page)||track.failedDetailPage===page)return;
+    const fromTick=Math.max(0,page-margin),toTick=Math.min(Math.ceil(endTick),page+pageSpan+margin);
+    const controller=new AbortController();
+    track.detailRequest=controller;
+    try{
+      const {points}=await api(`/api/worlds/body-trajectory?${worldQuery}&bodyId=${encodeURIComponent(track.id)}&fromTick=${fromTick}&toTick=${toTick}`,
+        undefined,{signal:controller.signal});
+      if(track!==bodyTrack||!pageActive)return;
+      const samples=points.filter(point=>point.tick<=endTick).map(point=>({...point,elapsedSeconds:point.tick/rate}));
+      const first=track.points[0],last=track.points.at(-1);
+      if(first.tick>=fromTick&&first.tick<=toTick&&samples[0]?.tick!==first.tick)samples.unshift(first);
+      if(last.tick>=fromTick&&last.tick<=toTick&&samples.at(-1)?.tick!==last.tick)samples.push(last);
+      track.detailPages.set(page,{fromTick,toTick,points:samples});
+      if(track.detailPages.size>3){
+        const currentPage=Math.floor(track.time*rate/pageSpan)*pageSpan;
+        const oldest=[...track.detailPages.keys()].reduce((a,b)=>Math.abs(a-currentPage)>=Math.abs(b-currentPage)?a:b);
+        track.detailPages.delete(oldest);
+      }
+      track.detailSections=combineBodyDetailPages(track.detailPages);
+      updateBodyTrackPosition(track);
+      draw();
+    }catch(error){
+      if(error.name!=='AbortError'&&track===bodyTrack)track.failedDetailPage=page;
+    }finally{
+      track.detailRequest=null;
+      if(track===bodyTrack&&pageActive&&track.failedDetailPage!==page)void loadBodyDetail(track);
+    }
+  }
+  function seekBody(time,{playback=false,showCollision=false}={}){
     if(!bodyTrack)return;
+    if(!playback&&mergeWaves.length)mergeWaves=mergeWaves.filter(wave=>wave.track!==bodyTrack);
+    if(playback||showCollision){
+      for(const event of bodyTrack.collisionEvents){
+        const reached=playback?event.time>bodyTrack.time&&event.time<=time:event.time===time;
+        if(reached)addMergeWave(event.wave,bodyTrack);
+      }
+    }
     bodyTrack.time=time;
-    bodyTrack.position=OrbitalHistory.interpolate(bodyTrack.points,time);
+    updateBodyTrackPosition(bodyTrack);
+    if(!playback)bodyTrack.failedDetailPage=null;
+    void loadBodyDetail(bodyTrack);
+    bodyTrack.body=bodyTrack.segments.findLast(segment=>segment.birthTime<=time)??bodyTrack.segments[0];
     bodyTimeline.value=time;
-    const label=time.toFixed(2)+' 模拟秒';
+    const collision=bodyTrack.collisionDescriptions.get(time);
+    const label=time.toFixed(2)+' 模拟秒'+(collision?' · '+collision:'');
     if(bodyHistoryTime.textContent!==label)bodyHistoryTime.textContent=label;
+  }
+  function renderBodyCollisionMarkers(){
+    bodyCollisionMarkers.replaceChildren();
+    bodyCollisionMarkers.hidden=!bodyTrack.collisions.size;
+    const {start,end}=bodyTrack;
+    for(const time of bodyTrack.collisions){
+      const marker=document.createElement('button');
+      marker.type='button';
+      marker.style.left=(end===start?0:(time-start)/(end-start)*100)+'%';
+      marker.title='跳到碰撞时刻 · '+time.toFixed(2)+' 模拟秒';
+      const description=bodyTrack.collisionDescriptions.get(time);
+      if(description)marker.title+=' · '+description;
+      marker.setAttribute('aria-label',marker.title);
+      marker.onclick=()=>{setBodyPlayback(false);seekBody(time,{showCollision:true});draw();};
+      bodyCollisionMarkers.append(marker);
+    }
   }
   bodyTimeline.oninput=()=>{
     seekBody(Number(bodyTimeline.value));
@@ -1021,13 +1243,15 @@
   };
   bodyHistoryPlay.onclick=()=>{
     if(!bodyTrack||bodyTrack.start===bodyTrack.end)return;
-    if(!bodyTrack.playing&&bodyTrack.time===bodyTrack.end)seekBody(bodyTrack.start);
+    if(!bodyTrack.playing&&(bodyTrack.time===bodyTrack.end||bodyTrack.time===bodyTrack.start)){
+      seekBody(bodyTrack.start,{showCollision:true});
+    }
     setBodyPlayback(!bodyTrack.playing);
     draw();
   };
   bodyHistorySelect.onchange=()=>{closeBodyTrack();$('body-history-load').disabled=!bodyHistorySelect.value;};
   $('body-history-close').onclick=()=>closeBodyTrack();
-  $('history-3d').addEventListener('click',()=>closeBodyTrack(false));
+  $('history-3d').addEventListener('click',()=>closeBodyTrack(false),true);
   $('body-history-load').onclick=async()=>{
     const id=bodyHistorySelect.value;
     if(!id||!online)return;
@@ -1036,18 +1260,40 @@
     const status=$('body-history-status');
     $('body-history-load').disabled=true;status.textContent='正在读取天体轨迹…';
     try{
-      const {body,points}=await api('/api/worlds/body-trajectory?'+worldQuery+'&bodyId='+encodeURIComponent(id),undefined,{signal:controller.signal});
+      const {body,points,segments=[body],contactFrame,collisionEvents=[],detailWindowTicks=0,
+        collisions=contactFrame?[contactFrame.tick]:[]}=await api('/api/worlds/body-trajectory?'+worldQuery+'&bodyId='+encodeURIComponent(id),undefined,{signal:controller.signal});
       if(bodyTrackRequest!==controller||!pageActive)return;
       if(!points.length)throw new Error('当前天体还没有轨迹。');
-      controls.leaveReplay();setTracking(false);clearBodyFocus();$('auto-fit').checked=false;
+      controls.leaveReplay();
+      const liveView={yaw,pitch,zoom,cameraTarget,cameraOffset:{...cameraOffset},selected,focusedBody,
+        trackedFlight:tracking?selectedFlight:null,autoFit:$('auto-fit').checked};
+      setTracking(false);clearBodyFocus();$('auto-fit').checked=false;
       const samples=points.map(point=>({...point,elapsedSeconds:point.tick/model.MODEL.tickRate}));
       const start=samples[0].elapsedSeconds,end=samples.at(-1).elapsedSeconds;
-      bodyTrack={body:{...body,rs:body.kind==='blackHole'?body.radius:0},points:samples,start,end,playing:false};
+      const visualBody=body=>({...body,rs:body.kind==='blackHole'?body.radius:0});
+      const descriptions=new Map();
+      for(const {tick,otherBodyId,absorbed} of collisionEvents){
+        const time=tick/model.MODEL.tickRate;
+        const current=bodyLabels.get(id)+(absorbed?' 被合并':' 继续运行');
+        const other=(bodyLabels.get(otherBodyId)??'未识别的天体')+(absorbed?' 继续运行':' 被合并');
+        const previous=descriptions.get(time);
+        descriptions.set(time,previous?`${previous} / ${current}，${other}`:`${current}，${other}`);
+      }
+      bodyTrack={id,points:samples,start,end,playing:false,offset:{x:0,y:0},liveView,
+        detailWindowTicks,detailPages:new Map(),detailSections:[],
+        segments:segments.map(segment=>({...visualBody(segment),birthTime:segment.birthTick/model.MODEL.tickRate})),
+        segmentIds:new Set(segments.map(segment=>segment.id)),
+        collisions:new Set(collisions.map(tick=>tick/model.MODEL.tickRate)),
+        collisionDescriptions:descriptions,
+        collisionEvents:collisionEvents.map(event=>({...event,time:event.tick/model.MODEL.tickRate})),
+        contactFrame:contactFrame&&{bodies:contactFrame.bodies.map(visualBody)}};
       bodyTimeline.min=start;bodyTimeline.max=end;
       bodyTimeline.disabled=bodyHistoryPlay.disabled=bodyHistoryRate.disabled=start===end;
+      renderBodyCollisionMarkers();
       setBodyPlayback(false);
       $('body-history-scrub').hidden=false;$('body-history-close').hidden=false;
-      status.textContent=`${bodyLabels.get(id)} · ${body.endTick==null?'历史轨迹':'合并前轨迹'}`;
+      const count=collisionEvents.length||collisions.length;
+      status.textContent=`${bodyLabels.get(id)} · ${count?`碰撞 ${count} 次`:'历史轨迹'}`;
       seekBody(start);draw();
     }catch(error){if(bodyTrackRequest===controller&&error.name!=='AbortError')status.textContent=error.message;}
     finally{if(bodyTrackRequest===controller){bodyTrackRequest=null;$('body-history-load').disabled=false;}}
@@ -1250,15 +1496,18 @@
   }
   function adoptSession(session){
     if(userId!==session.user.id){
+      if(dynamic)closeBodyTrack(false);
       stream?.close();stream=null;
       pendingLaunch=null;selectedFlight='';lastLaunchedId='';
       liveTrail.length=0;trailTick=-12;
       satellites.clear();frozenFlights.clear();removedFlights.clear();impacts.length=0;
+      mergeWaves=[];
       flightSelect.options.length=1;
       hiddenFlights=false;setTracking(false);cameraTarget=null;
       pauseRevision=-1;serverTick=dynamic?0:config.server?.tick??0;tickSeen=performance.now();
       simulationRate=1;rateControl.value='1';
-      if(dynamic){closeBodyTrack(false);bodyFrame=null;resetBodyChoices();}
+      rateAnchor=null;actualRate.textContent='实际 —';
+      if(dynamic){bodyFrame=null;liveSample=null;liveBodyObserver.reset();pendingLiveMerges.length=0;resetBodyChoices();}
       setPlaying(true);
       revealKey();controls.reset();
     }
@@ -1429,7 +1678,7 @@
     stopFrame();
     clearTimeout(previewTimer);
     worker?.terminate();
-    bodyTrackRequest?.abort();archiveRequest?.controller.abort();
+    bodyTrackRequest?.abort();bodyTrack?.detailRequest?.abort();archiveRequest?.controller.abort();
     stream?.close();
     controls.reset();
     historyRenderer?.destroy();

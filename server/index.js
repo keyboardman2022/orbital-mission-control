@@ -133,7 +133,9 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       if(path==='/api/model'&&req.method==='GET')return json(res,200,await rpc('modelInfo',worldId));
       const token=tokenOf(req),auth=await rpc('authenticate',token);if(mutating)checkCsrf(req,auth);
       if(path==='/api/worlds/body-trajectory'&&req.method==='GET'){
-        return json(res,200,await rpc('bodyTrajectory',auth.userId,worldId,url.searchParams.get('bodyId')));
+        const fromTick=url.searchParams.get('fromTick'),toTick=url.searchParams.get('toTick');
+        const range=fromTick!==null||toTick!==null?{fromTick,toTick}:undefined;
+        return json(res,200,await rpc('bodyTrajectory',auth.userId,worldId,url.searchParams.get('bodyId'),range));
       }
       if(path==='/api/worlds/body-frame'&&req.method==='GET'){
         const tick=url.searchParams.get('tick');

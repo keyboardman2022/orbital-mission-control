@@ -8,14 +8,20 @@ const wallOrigin=Date.now(),monoOrigin=performance.now();
 const engine=new Engine({filename:workerData.filename,now:()=>wallOrigin+performance.now()-monoOrigin,maxActive:workerData.maxActive,velocityRelativeTolerance:workerData.velocityRelativeTolerance});
 engine.interruptExports();
 let lastCommit=performance.now(),lastArchive=performance.now(),lastMono=performance.now();
+// Give high-rate maps more turns and cap how long any turn can block RPCs.
+const pollMs=12;
 const timer=setInterval(()=>{
   try{
     const mono=performance.now(),elapsed=Math.max(0,(mono-lastMono)/1000);lastMono=mono;
-    engine.advanceRealtime(elapsed,{budgetMs:12});
-    if(mono-lastCommit>=1000||engine.pending.length>=10000){engine.checkpoint();lastCommit=mono;}
-    if(mono-lastArchive>=1000&&engine.tick>=86400*M.MODEL.tickRate){engine.archive();lastArchive=performance.now();}
+    engine.advanceRealtime(elapsed,{budgetMs:16});
+    if(mono-lastArchive>=1000&&engine.tick>=86400*M.MODEL.tickRate){
+      // Archive already checkpoints; avoid flushing the same batch twice.
+      engine.archive();lastArchive=performance.now();lastCommit=lastArchive;
+    }else if(mono-lastCommit>=1000||engine.pending.length>=10000){
+      engine.checkpoint();lastCommit=performance.now();
+    }
   }catch(error){parentPort.postMessage({type:'fatal',message:error.message});clearInterval(timer);}
-},25);
+},pollMs);
 parentPort.on('message',({id,method,args=[]})=>{
   try{
     let result;
