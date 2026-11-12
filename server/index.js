@@ -229,9 +229,9 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
         try{
           await rpc('authenticate',s.token);
           const key=s.userId+':'+(s.worldId??'');
-          if(!cache.has(key))cache.set(key,await rpc('list',s.userId,{limit:100,worldId:s.worldId,dimension:3}));
+          if(!cache.has(key))cache.set(key,await rpc('list',s.userId,{limit:100,worldId:s.worldId,dimension:3,includeLive:true}));
           let data=cache.get(key);
-          if(s.selectedId&&!data.satellites.some(p=>p.id===s.selectedId))data={...data,satellites:[...data.satellites,await rpc('get',s.userId,s.selectedId)]};
+          if(s.selectedId&&!data.satellites.some(p=>p.id===s.selectedId))data={...data,satellites:[...data.satellites,await rpc('get',s.userId,s.selectedId,{includeLive:true})]};
           if(s.res.writableLength>1024*1024){s.res.destroy();continue;}
           s.res.write('event: snapshot\ndata: '+JSON.stringify(buildSnapshot(s.snapshot,data,{selectedId:s.selectedId}))+'\n\n');
         }catch{s.res.end();}

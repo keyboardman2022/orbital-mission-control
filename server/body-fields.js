@@ -7,6 +7,8 @@ const SAMPLE_TICKS=480;
 const DETAIL_WINDOW_SAMPLES=2048;
 const DETAIL_WINDOW_TICKS=SAMPLE_TICKS*DETAIL_WINDOW_SAMPLES;
 const RATE=Model.MODEL.tickRate;
+const LIVE_PATH_INTERVAL=RATE/2;
+const LIVE_PATH_LIMIT=160;
 const key=(userId,worldId)=>`${userId}:${worldId}`;
 const point=(body,tick)=>({tick,x:body.x,y:body.y,z:body.z,vx:body.vx,vy:body.vy,vz:body.vz});
 const meta=(body,birthTick)=>({id:body.id,name:body.name,kind:body.kind,color:body.color,...(body.bodyClass?{bodyClass:body.bodyClass}:{}),
@@ -46,20 +48,48 @@ function createField(userId,worldId,world,saved){
   let tick=saved?.tick??0,seen=0,dirty=!saved;
   const tracks=[],catalog=new Map(saved?.catalog?.map(body=>[body.id,body])??sim.bodies.map(body=>[body.id,meta(body,0)]));
   if(saved)restoreCollisionLinks(catalog);
-  const frames=new Map();
-  function frame(){
-    let bodies=frames.get(tick);
-    if(bodies)return bodies;
-    bodies=sim.bodies.map(body=>({...body}));
-    frames.set(tick,bodies);
-    if(frames.size>4)frames.delete(frames.keys().next().value);
+  // The integrator reads adjacent ticks (and occasionally a fractional hit).
+  // Reuse four slots so a fast field does not allocate a body per tick per star.
+  const gravityFrames=Array.from({length:4},()=>({tick:-1,nextId:0,bodies:[]}));
+  const liveFrames=[];
+  let snapshotTick=-1,snapshotBodies;
+  function gravityFrame(){
+    const slot=gravityFrames[tick%gravityFrames.length],bodies=slot.bodies;
+    if(slot.tick===tick)return bodies;
+    if(slot.nextId!==sim.nextId){
+      bodies.length=0;
+      for(const b of sim.bodies)bodies.push({
+        id:b.id,name:b.name,kind:b.kind,radius:b.radius,massSolar:b.mass,
+        mu:Generator.MU_PER_SOLAR_MASS*b.mass,rs:b.kind==='blackHole'?b.radius:0,
+        collisionRadius:b.radius,softening:Generator.N_BODY_SOFTENING,
+        x:0,y:0,z:0,vx:0,vy:0,vz:0
+      });
+      slot.nextId=sim.nextId;
+    }
+    let finite=true;
+    for(let i=0;i<bodies.length;i++){
+      const source=sim.bodies[i],target=bodies[i];
+      target.x=source.x;target.y=source.y;target.z=source.z;
+      target.vx=source.vx;target.vy=source.vy;target.vz=source.vz;
+      finite=finite&&Number.isFinite(source.x)&&Number.isFinite(source.y)&&Number.isFinite(source.z)&&
+        target.mu>=0&&target.mu<1e100;
+    }
+    bodies.boundedEnergy=finite;
+    slot.tick=tick;
     return bodies;
+  }
+  function frame(){
+    if(snapshotTick!==tick){
+      snapshotTick=tick;
+      snapshotBodies=sim.bodies.map(body=>({...body}));
+    }
+    return snapshotBodies;
   }
   const sample=(body,at)=>tracks.push({id:body.id,...point(body,at)});
   if(!saved)for(const body of sim.bodies)sample(body,0);
-  function advanceTo(target,retainPrevious=false){
+  function advanceTo(target,retainPrevious=false,recordLive=false){
     while(tick<target){
-      if(retainPrevious)frame();
+      if(retainPrevious)gravityFrame();
       sim.step(1/RATE);tick++;dirty=true;
       for(;seen<sim.collisions.length;seen++){
         const {first,second,result,time}=sim.collisions[seen];
@@ -74,17 +104,24 @@ function createField(userId,worldId,world,saved){
         catalog.set(result.id,{...meta(result,at),continuedFrom:survivor.id,absorbedFrom:absorbed.id,mergeOrigin:{x,y,z}});sample(result,at);
       }
       if(tick%SAMPLE_TICKS===0)for(const body of sim.bodies)sample(body,tick);
+      if(recordLive&&tick%LIVE_PATH_INTERVAL===0){
+        liveFrames.push({tick,positions:sim.bodies.map(({id,x,y,z})=>[id,x,y,z])});
+        if(liveFrames.length>LIVE_PATH_LIMIT)liveFrames.shift();
+      }
     }
   }
-  function at(time){
-    const start=frames.get(Math.floor(time))??frame();
+  function gravityAt(time){
+    const tick=Math.floor(time),slot=gravityFrames[tick%gravityFrames.length];
+    const start=slot?.tick===tick?slot.bodies:gravityFrame();
     if(Number.isInteger(time))return start;
     const fraction=(time-Math.floor(time))/RATE;
     return start.map(body=>({...body,x:body.x+body.vx*fraction,y:body.y+body.vy*fraction,z:body.z+body.vz*fraction}));
   }
-  return {userId,worldId,tracks,catalog,advanceTo,at,runtime:Model.createRuntime(world,at),
+  return {userId,worldId,tracks,catalog,advanceTo,currentBodies:frame,
+    runtime:Model.createRuntime(world,gravityAt,{preparedBodies:true}),
     get tick(){return tick;},get dirty(){return dirty;},
     snapshot:()=>({tick,nextId:sim.nextId,bodies:frame(),catalog:[...catalog.values()]}),
+    livePath:since=>liveFrames.filter(frame=>frame.tick>since),
     serialize:()=>({tick,time:sim.time,nextId:sim.nextId,bodies:sim.bodies,catalog:[...catalog.values()]}),
     committed(){dirty=false;tracks.length=0;}
   };
@@ -101,8 +138,6 @@ class BodyFields{
       x REAL NOT NULL,y REAL NOT NULL,z REAL NOT NULL,vx REAL NOT NULL,vy REAL NOT NULL,vz REAL NOT NULL,
       PRIMARY KEY(user_id,world_id,body_id,tick),
       FOREIGN KEY(user_id,world_id) REFERENCES body_fields(user_id,world_id) ON DELETE CASCADE) WITHOUT ROWID;`);
-    this.save=db.prepare('INSERT INTO body_fields VALUES (?,?,?) ON CONFLICT(user_id,world_id) DO UPDATE SET state=excluded.state');
-    this.insert=db.prepare('INSERT OR REPLACE INTO body_tracks VALUES (?,?,?,?,?,?,?,?,?,?)');
   }
   restore(worldFor){
     for(const row of this.db.prepare('SELECT * FROM body_fields').all()){
@@ -116,12 +151,13 @@ class BodyFields{
   get(userId,worldId){return this.fields.get(key(userId,worldId));}
   forget(userId,worldId){this.fields.delete(key(userId,worldId));}
   deleteRows(userId,worldId){this.db.prepare('DELETE FROM body_fields WHERE user_id=? AND world_id=?').run(userId,worldId);}
-  flush(){
+  checkpointFields(){
+    const batch=[];
     for(const field of this.fields.values())if(field.dirty){
       const {userId,worldId}=field;
-      this.save.run(userId,worldId,JSON.stringify(field.serialize()));
-      for(const p of field.tracks)this.insert.run(userId,worldId,p.id,p.tick,p.x,p.y,p.z,p.vx,p.vy,p.vz);
+      batch.push({userId,worldId,state:field.serialize(),tracks:field.tracks});
     }
+    return batch;
   }
   committed(){for(const field of this.fields.values())field.committed();}
   trajectory(field,id,range){
@@ -145,7 +181,7 @@ class BodyFields{
     const readPoints=this.db.prepare(`SELECT tick,x,y,z,vx,vy,vz FROM body_tracks
       WHERE user_id=? AND world_id=? AND body_id=? AND (tick=? OR tick=? OR (tick=CAST(tick AS INTEGER) AND CAST(tick AS INTEGER)%?=0)) ORDER BY tick`);
     const points=segments.flatMap(segment=>readPoints.all(field.userId,field.worldId,segment.id,segment.birthTick,segment.endTick,stride));
-    const live=field.at(field.tick).find(item=>item.id===last.id);
+    const live=field.currentBodies().find(item=>item.id===last.id);
     if(live&&points.at(-1)?.tick!==field.tick)points.push(point(live,field.tick));
     const originalId=segmentId=>{
       let segment=field.catalog.get(segmentId);
@@ -171,7 +207,7 @@ class BodyFields{
       detailWindowTicks:stride>SAMPLE_TICKS?DETAIL_WINDOW_TICKS:0,...(contactFrame&&{contactFrame})};
   }
   historyFrame(field,tick,{atContact=false}={}){
-    if(tick>=field.tick&&!atContact)return {tick:field.tick,bodies:field.at(field.tick)};
+    if(tick>=field.tick&&!atContact)return {tick:field.tick,bodies:field.currentBodies()};
     const before=this.db.prepare(`SELECT tick,x,y,z,vx,vy,vz FROM body_tracks WHERE user_id=? AND world_id=? AND body_id=? AND tick<=? ORDER BY tick DESC LIMIT 1`);
     const after=this.db.prepare(`SELECT tick,x,y,z,vx,vy,vz FROM body_tracks WHERE user_id=? AND world_id=? AND body_id=? AND tick>=? ORDER BY tick LIMIT 1`);
     const bodies=[];
@@ -181,7 +217,7 @@ class BodyFields{
       const args=[field.userId,field.worldId,body.id,tick];
       const a=before.get(...args);
       if(!a)continue;
-      const live=field.at(field.tick).find(item=>item.id===body.id);
+      const live=field.currentBodies().find(item=>item.id===body.id);
       const b=after.get(...args)??(live&&point(live,field.tick))??a;
       const t=a.tick===b.tick?0:(tick-a.tick)/(b.tick-a.tick);
       bodies.push({...body,...Object.fromEntries(['x','y','z','vx','vy','vz'].map(axis=>[axis,a[axis]+(b[axis]-a[axis])*t]))});
@@ -190,4 +226,4 @@ class BodyFields{
   }
 }
 
-module.exports={BodyFields,initialBodies,DETAIL_WINDOW_TICKS};
+module.exports={BodyFields,initialBodies,DETAIL_WINDOW_TICKS,LIVE_PATH_INTERVAL,LIVE_PATH_LIMIT};

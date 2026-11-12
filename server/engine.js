@@ -4,8 +4,9 @@ const {randomUUID,randomBytes,createHash}=require('node:crypto');
 const M=require('../shared/simulation.js');
 const U=require('../shared/units.js');
 const {generateWorld,N_BODY_MOTION}=require('../shared/world-generator.js');
-const {BodyFields,DETAIL_WINDOW_TICKS}=require('./body-fields.js');
+const {BodyFields,DETAIL_WINDOW_TICKS,LIVE_PATH_INTERVAL,LIVE_PATH_LIMIT}=require('./body-fields.js');
 const {createSampler,POLICY}=require('./trajectory-sampler.js');
+const {createCheckpointStore}=require('./checkpoint-store.js');
 const Budget=require('./trajectory-budget.js');
 const {initializeStore,readPoints,archiveBatch,archivePath}=require('./trajectory-store.js');
 const {statSync,unlinkSync}=require('node:fs');
@@ -22,7 +23,7 @@ class Engine{
     if(!Number.isFinite(velocityRelativeTolerance)||velocityRelativeTolerance<0||velocityRelativeTolerance>.01)throw new Error('速度相对记录容差须在0–0.01范围内');
     this.samplingPolicy={...POLICY,velocityRelativeTolerance};
     this.filename=filename;this.samplers=new Map();
-    this.worlds=new Map();this.recordRuntimes=new WeakMap();
+    this.worlds=new Map();this.recordRuntimes=new WeakMap();this.liveFlightPaths=new WeakMap();
     this.metrics={rawSteps:0,savedPoints:0,checkpointMs:0,checkpointMaxMs:0,archivedPoints:0,archiveMs:0,archiveError:null};
     this.maxActive=maxActive;
     this.trajectoryPolicy=Budget.createPolicy(trajectoryMaxPoints);
@@ -46,7 +47,6 @@ class Engine{
     if(!this.db.prepare("SELECT 1 FROM pragma_table_info('points') WHERE name='z'").get()){
       this.transaction(()=>this.db.exec('ALTER TABLE points ADD COLUMN z REAL; ALTER TABLE points ADD COLUMN vz REAL;'));
     }
-    this.sql={point:this.db.prepare('INSERT INTO points(satellite_id,seq,tick,elapsed,x,y,vx,vy,kind,z,vz) VALUES (?,?,?,?,?,?,?,?,?,?,?)'),event:this.db.prepare('INSERT INTO events VALUES (?,?,?)'),record:this.db.prepare('UPDATE satellites SET record=? WHERE id=?'),clock:this.db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)')};
     const meta=this.db.prepare('SELECT value FROM meta WHERE key=?');
     const config=meta.get('model');
     if(config&&JSON.parse(config.value).version!==M.MODEL.version)throw new Error('数据库模型版本与程序不匹配，拒绝静默迁移');
@@ -57,6 +57,7 @@ class Engine{
     this.spatialClocks=new Map(this.db.prepare("SELECT key,value FROM meta WHERE key LIKE 'spatial-clock:%'").all()
       .map(({key,value})=>[key,JSON.parse(value)]));
     this.bodyFields=new BodyFields(this.db);
+    this.store=createCheckpointStore(this.db);
     this.bodyFields.restore(worldId=>this.worldInfo(worldId).world);
     this.records=new Map();this.dirty=new Set();this.pending=[];this.pendingEvents=[];
     for(const row of this.db.prepare('SELECT record FROM satellites').iterate()){
@@ -122,25 +123,27 @@ class Engine{
     const key=spatialClockKey(userId,worldId),previous=this.spatialClocks.get(key);
     const clock={offset:this.tick,pausedAt:null,revision:previous?.revision??0};
     const field=this.bodyFields.open(userId,worldId,world);
-    try{this.checkpoint(()=>this.sql.clock.run(key,JSON.stringify(clock)));}
+    try{this.checkpoint(()=>this.store.writeClock(key,clock));}
     catch(error){this.bodyFields.forget(userId,worldId);throw error;}
     this.spatialClocks.set(key,clock);
     return field;
   }
-  viewClock(userId,worldId,dimension){
+  viewClock(userId,worldId,dimension,includeLive=false){
     const server=this.health();
     if(dimension!==3)return server;
     const field=this.ensureBodyField(userId,worldId);
     const clock=this.spatialClocks.get(spatialClockKey(userId,worldId));
-    return {...server,tick:this.spatialTick(clock),paused:clock?.pausedAt!=null,pauseRevision:clock?.revision??0,simulationRate:clock?.rate??1,
-      ...(field?{bodyField:field.snapshot()}:{})};
+    const rate=clock?.rate??1;
+    return {...server,tick:this.spatialTick(clock),paused:clock?.pausedAt!=null,pauseRevision:clock?.revision??0,simulationRate:rate,
+      ...(field?{bodyField:field.snapshot()}:{}),
+      ...(field&&includeLive&&rate>M.MODEL.livePathAboveRate?{bodyLivePath:field.livePath(field.tick-rate*M.MODEL.tickRate*.65)}:{})};
   }
   setSpatialPaused(userId,worldId,paused){
     if(typeof paused!=='boolean')fail(422,'请选择暂停或继续模拟');
     return this.configureSpatialClock(userId,worldId,{paused});
   }
   setSpatialRate(userId,worldId,rate){
-    if(!M.MODEL.simulationRates.includes(rate))fail(422,'请选择支持的模拟倍速');
+    if(!this.worldInfo(worldId).runtime.MODEL.simulationRates.includes(rate))fail(422,'请选择支持的模拟倍速');
     return this.configureSpatialClock(userId,worldId,{rate});
   }
   configureSpatialClock(userId,worldId,{paused,rate}){
@@ -152,7 +155,7 @@ class Engine{
     if(nextPaused!==wasPaused||nextRate!==oldRate){
       const next={anchorTick:this.tick,fieldTick:this.spatialTick(clock),rate:nextRate,
         pausedAt:nextPaused?this.tick:null,revision:(clock?.revision??0)+1};
-      this.checkpoint(()=>this.sql.clock.run(key,JSON.stringify(next)));
+      this.checkpoint(()=>this.store.writeClock(key,next));
       this.spatialClocks.set(key,next);
     }
     return this.active(userId,worldId,3);
@@ -187,7 +190,20 @@ class Engine{
   publicRecord(r){const {ownerId,seq,lastSample,eventSeq,requestHash,trajectoryBudget,...result}=r;return structuredClone({...result,
     calibration:r.initial.calibration||U.SCALE,calibrationInferred:!r.initial.calibration,
     telemetry:U.telemetry(r.state,r.initial.calibration||U.SCALE),trajectoryCoverage:Budget.coverage(r)});}
-  get(userId,id){return this.publicRecord(this.owned(userId,id));}
+  get(userId,id,{includeLive=false}={}){
+    const record=this.owned(userId,id);
+    return includeLive?this.liveRecord(record):this.publicRecord(record);
+  }
+  liveRecord(record){
+    const result=this.publicRecord(record);
+    const rate=this.spatialClocks.get(spatialClockKey(record.ownerId,record.worldId))?.rate??1;
+    const path=this.liveFlightPaths.get(record);
+    if(rate>M.MODEL.livePathAboveRate&&path){
+      const since=record.state.fieldTick-rate*M.MODEL.tickRate*.65;
+      result.livePath=path.filter(point=>point[0]>since);
+    }
+    return result;
+  }
   launch(userId,input){
     const info=this.worldInfo(input.worldId),{worldId}=info;
     const field=this.ensureBodyField(userId,worldId,info.world),runtime=field?.runtime??info.runtime;
@@ -205,7 +221,7 @@ class Engine{
     if(old){if(old.request_hash!==requestHash)fail(409,'同一发射请求不能更换参数');return this.get(userId,old.id);}
     const fieldTick=input.dimension===3?this.spatialTick(this.spatialClocks.get(spatialClockKey(userId,worldId))):this.tick;
     initial??=runtime.validateLaunch(runtime.resolveLaunch(input,fieldTick));
-    if(field&&field.at(fieldTick).some(body=>body.kind==='blackHole'&&Math.hypot(initial.position.x-body.x,
+    if(field&&field.currentBodies().some(body=>body.kind==='blackHole'&&Math.hypot(initial.position.x-body.x,
       initial.position.y-body.y,initial.position.z-body.z)<=body.radius))fail(422,'位置在黑洞捕获面内，无法发射');
     if(initial.dynamicsVersion!==runtime.MODEL.dynamics.version)fail(409,'新发射必须使用当前多引力源动力学版本，请刷新页面');
     if(this.clockError)fail(503,'服务器时钟异常，暂不能发射');
@@ -227,7 +243,7 @@ class Engine{
     this.ensureSampler(r);
     return this.publicRecord(r);
   }
-  insertPoint(id,p){this.sql.point.run(id,p.seq,p.tick,p.elapsedSeconds,p.x,p.y,p.vx,p.vy,p.kind,p.z??null,p.vz??null);}
+  insertPoint(id,p){this.store.insertPoint(id,p);}
   enqueuePoint(r,p){
     if(!Budget.admit(r,p))return false;
     this.pending.push({id:r.id,p});this.dirty.add(r.id);
@@ -270,7 +286,12 @@ class Engine{
     // Retain fractions for 240 Hz accuracy, but never accumulate missed whole steps.
     this.realtimeRemainder+=Math.min(seconds,.1)*M.MODEL.tickRate;
     const steps=Math.floor(this.realtimeRemainder+1e-9);this.realtimeRemainder=Math.max(0,this.realtimeRemainder-steps);
-    if(steps)this.advanceTo(this.tick+steps,{maxSteps:steps,budgetMs});
+    if(steps){
+      const before=this.tick;
+      this.advanceTo(before+steps,{maxSteps:steps,budgetMs});
+      this.metrics.skippedTicks=(this.metrics.skippedTicks??0)+steps-(this.tick-before);
+    }
+    this.metrics.clampedSeconds=(this.metrics.clampedSeconds??0)+Math.max(0,seconds-.1);
   }
   advanceTo(target,{maxSteps=Infinity,budgetMs=Infinity}={}){
     if(this.clockError)return;
@@ -288,47 +309,90 @@ class Engine{
       schedule(flights,r,clock);
     }
     const flightRuntimes=new Set(flights.map(({item})=>this.recordRuntimes.get(item)));
-    for(const work of fields)work.retainPrevious=flightRuntimes.has(work.item.runtime);
+    const liveRuntimes=new Set();
+    for(const work of fields){
+      work.retainPrevious=flightRuntimes.has(work.item.runtime);
+      work.recordLive=work.rate>M.MODEL.livePathAboveRate;
+      if(work.recordLive)liveRuntimes.add(work.item.runtime);
+    }
     let liveFlights=flights.length;
     while(this.tick<target&&steps<maxSteps&&performance.now()-started<budgetMs){
       if(!liveFlights&&!fields.length){this.tick=target;break;}
       // Advance each celestial field immediately before the matching satellite step.
       for(let round=0;round<rounds;round++){
-        for(const {item:field,rate,retainPrevious} of fields)if(round<rate)field.advanceTo(field.tick+1,retainPrevious);
-        for(const {item:r,rate} of flights){
+        for(const {item:field,rate,retainPrevious,recordLive} of fields)if(round<rate)field.advanceTo(field.tick+1,retainPrevious,recordLive);
+        for(const flight of flights){
+          const {item:r,rate}=flight;
           if(round>=rate||r.status!=='active')continue;
-          const sampler=this.ensureSampler(r);(this.recordRuntimes.get(r)??M).step(r.state);this.metrics.rawSteps++;if(sampler)sampler.push(M.snapshot(r.state));this.dirty.add(r.id);
+          if(flight.sampler===undefined){
+            flight.sampler=this.ensureSampler(r);
+            flight.runtime=this.recordRuntimes.get(r)??M;
+            flight.recordLive=liveRuntimes.has(flight.runtime);
+            this.dirty.add(r.id);
+          }
+          const sampler=flight.sampler;
+          flight.runtime.step(r.state);
+          this.metrics.rawSteps++;
+          if(flight.recordLive&&r.state.fieldTick%LIVE_PATH_INTERVAL===0){
+            let path=this.liveFlightPaths.get(r);
+            if(!path){path=[];this.liveFlightPaths.set(r,path);}
+            const {fieldTick,x,y,z}=r.state;
+            path.push([fieldTick,x,y,z]);
+            if(path.length>LIVE_PATH_LIMIT)path.shift();
+          }
+          if(sampler)sampler.push(r.state,r.state.status==='active'?'sample':r.state.status);
           if(r.state.status!=='active'){this.finish(r,r.state.status);liveFlights--;continue;}
-          if(sampler?.size>=POLICY.blockTicks+1)this.flushSampler(r);
+          if(sampler?.size>=POLICY.blockTicks+1){
+            this.flushSampler(r);
+            flight.sampler=this.samplers.get(r.id)??null;
+          }
         }
       }
       this.tick++;steps++;
     }
   }
-  checkpoint(extra){
-    const started=performance.now();
+  captureCheckpoint(){
     for(const id of this.dirty){const r=this.records.get(id);if(r&&this.samplers.has(id))this.flushSampler(r);}
-    if(!this.clockError)this.lastGoodWallMs=Math.max(this.lastGoodWallMs,this.now());
-    this.transaction(()=>{
-      for(const {id,p} of this.pending)this.insertPoint(id,p);
-      for(const e of this.pendingEvents)this.sql.event.run(e.id,e.seq,JSON.stringify(e.event));
-      for(const id of this.dirty){const r=this.records.get(id);if(r)this.sql.record.run(JSON.stringify(r),id);}
-      this.bodyFields.flush();
-      extra?.();
-      this.sql.clock.run('clock',JSON.stringify({mode:'runtime-only-v1',epochMs:this.now()-this.tick/M.MODEL.tickRate*1000,tick:this.tick,savedWallMs:this.lastGoodWallMs}));
-    });
-    this.bodyFields.committed();
-    this.metrics.savedPoints+=this.pending.length;this.metrics.checkpointMs=performance.now()-started;this.metrics.checkpointMaxMs=Math.max(this.metrics.checkpointMaxMs,this.metrics.checkpointMs);
-    this.pending=[];this.pendingEvents=[];this.dirty.clear();
-    for(const [id,r] of this.records)if(!['active','queued'].includes(r.status)){this.records.delete(id);this.samplers.delete(id);}
+    const now=this.now();
+    if(!this.clockError)this.lastGoodWallMs=Math.max(this.lastGoodWallMs,now);
+    return {points:this.pending,events:this.pendingEvents,records:[...this.dirty].map(id=>this.records.get(id)).filter(Boolean),
+      fields:this.bodyFields.checkpointFields(),clock:{mode:'runtime-only-v1',epochMs:now-this.tick/M.MODEL.tickRate*1000,tick:this.tick,savedWallMs:this.lastGoodWallMs}};
   }
-  list(userId,{cursor,limit,worldId,dimension}={}){
+  releaseCheckpoint(){
+    this.bodyFields.committed();
+    this.pending=[];this.pendingEvents=[];this.dirty.clear();
+  }
+  completeCheckpoint({pointCount,terminalIds,tick},checkpointMs){
+    this.metrics.savedPoints+=pointCount;
+    this.metrics.checkpointSavedTick=tick;
+    this.metrics.checkpointMs=checkpointMs;
+    this.metrics.checkpointMaxMs=Math.max(this.metrics.checkpointMaxMs,checkpointMs);
+    for(const id of terminalIds){
+      this.records.delete(id);
+      this.samplers.delete(id);
+    }
+  }
+  checkpointReceipt(batch){
+    return {pointCount:batch.points.length,tick:batch.clock.tick,
+      terminalIds:batch.records.filter(r=>!['active','queued'].includes(r.status)).map(r=>r.id)};
+  }
+  checkpoint(extra){
+    const started=performance.now(),batch=this.captureCheckpoint();
+    this.store.write(batch,extra);
+    this.releaseCheckpoint();
+    this.completeCheckpoint(this.checkpointReceipt(batch),performance.now()-started);
+  }
+  list(userId,{cursor,limit,worldId,dimension,includeLive=false}={}){
     this.worldInfo(worldId);
     const after=integer(cursor,Number.MAX_SAFE_INTEGER),count=integer(limit,50,1,100),space=integer(dimension,2,2,3);
     const rows=this.db.prepare(`SELECT s.rowid AS cursor,s.id,s.record FROM satellites s
       LEFT JOIN satellite_worlds sw ON sw.satellite_id=s.id
       WHERE s.user_id=? AND s.rowid<? AND sw.world_id IS ? AND COALESCE(json_extract(s.record,'$.initial.dimension'),2)=? ORDER BY s.rowid DESC LIMIT ?`).all(userId,after,worldId??null,space,count+1);
-    return {satellites:rows.slice(0,count).map(row=>this.publicRecord(this.records.get(row.id)||JSON.parse(row.record))),nextCursor:rows.length>count?rows[count-1].cursor:null,server:this.viewClock(userId,worldId,space)};
+    const satellites=rows.slice(0,count).map(row=>{
+      const record=this.records.get(row.id)||JSON.parse(row.record);
+      return includeLive===true?this.liveRecord(record):this.publicRecord(record);
+    });
+    return {satellites,nextCursor:rows.length>count?rows[count-1].cursor:null,server:this.viewClock(userId,worldId,space,includeLive===true)};
   }
   active(userId,worldId,dimension){
     this.worldInfo(worldId);
@@ -429,7 +493,7 @@ class Engine{
     const cleanup=this.transaction(()=>{
       const files=this.removeSatelliteRows(userId,ids);
       this.bodyFields.deleteRows(userId,fromWorldId);
-      if(clock)this.sql.clock.run(clockKey,JSON.stringify(clock));
+      if(clock)this.store.writeClock(clockKey,clock);
       const work=ids.length||clock?{ids,...files}:null;
       this.db.prepare('INSERT INTO map_switches VALUES (?,?,?,?,?,?)').run(userId,switchId,fromWorldId,toWorldId,ids.length,work&&JSON.stringify(work));
       return work;

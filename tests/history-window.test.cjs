@@ -152,3 +152,14 @@ test('celestial display switches collision participants at the archived impact t
   assert.deepEqual(observer.sample(300).bodies,[body('merged',5)]);
   assert.deepEqual(observer.sample(400).bodies,[body('merged',8)]);
 });
+
+test('live high-rate display follows a confirmed bend instead of drawing an endpoint chord',()=>{
+  const observer=history.createBodyFrameObserver();
+  const frame=(tick,x,y)=>({tick,bodies:[{id:'probe',x,y,z:0}],catalog:[]});
+  observer.accept(frame(0,0,0),0);
+  observer.accept(frame(240,10,0),200,{path:[{tick:120,positions:[['probe',5,8,0]]}]});
+  assert.deepEqual(observer.sample(300).bodies[0],{id:'probe',x:5,y:8,z:0});
+  assert.deepEqual(observer.sample(350).bodies[0],{id:'probe',x:7.5,y:4,z:0});
+  observer.accept(frame(300,12,-2),360,{paused:true});
+  assert.deepEqual(observer.sample(360),frame(300,12,-2));
+});

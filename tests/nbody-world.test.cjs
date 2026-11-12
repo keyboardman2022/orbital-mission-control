@@ -134,3 +134,29 @@ test('simulation speed advances bodies and satellites together without changing 
   assert.equal(engine.get(a,fast.id).state.fieldTick,720);
   assert.equal(clock(b).tick,540);
 });
+
+test('high-speed streams provide confirmed intermediate points for both stars and satellites',t=>{
+  const dir=mkdtempSync(join(tmpdir(),'orbital-nbody-live-path-'));
+  const engine=new Engine({filename:join(dir,'orbital.sqlite')});
+  t.after(()=>{engine.close();rmSync(dir,{recursive:true,force:true});});
+  const user=engine.guest().user.id;
+  const {worldId}=engine.registerWorld({seed:'high speed stream',options:{layout:'spatial-v8',systems:2,stars:6,blackHoles:0}});
+  const start=engine.setSpatialRate(user,worldId,32).server.bodyField;
+  const body=start.bodies[0];
+  const flight=engine.launch(user,{worldId,referenceBodyId:body.id,name:'probe',position:{x:2400,y:0,z:0},
+    dimension:3,pitchDeg:0,speed:5,directionDeg:90,massKg:1000,dynamicsVersion:'seeded-nbody-v1',idempotencyKey:'live-probe'});
+  engine.advanceTo(15);
+  const ordinary=engine.list(user,{worldId,dimension:3});
+  const streamed=engine.list(user,{worldId,dimension:3,includeLive:true});
+  assert.equal(streamed.server.tick,480);
+  assert.equal(ordinary.server.bodyLivePath,undefined);
+  assert.equal(ordinary.satellites[0].livePath,undefined);
+  assert.deepEqual(streamed.server.bodyLivePath.map(frame=>frame.tick),[120,240,360,480]);
+  assert.deepEqual(streamed.satellites[0].livePath.map(point=>point[0]),[120,240,360,480]);
+  const current=streamed.satellites[0].state;
+  assert.equal(streamed.satellites[0].id,flight.id);
+  assert.deepEqual(streamed.satellites[0].livePath.at(-1),[480,current.x,current.y,current.z]);
+  engine.setSpatialPaused(user,worldId,true);
+  engine.advanceTo(21);
+  assert.deepEqual(engine.list(user,{worldId,dimension:3,includeLive:true}).server.bodyLivePath,streamed.server.bodyLivePath);
+});

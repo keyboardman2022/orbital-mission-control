@@ -118,7 +118,7 @@
   let selectedFlight='', predicted=[], tracking=false, cameraTarget=null, lastLaunchedId='';
   let hiddenFlights=false, focusedBody='', mapTool='pan', launchDraft=null, launchPosition=null;
   let launchVisible=true, lastTelemetry=0;
-  const impacts=[];
+  const impacts=[],pendingImpacts=[];
   let mergeWaves=[];
   const mergeWaveDuration=1.2;
   const liveTrail=[];
@@ -158,12 +158,30 @@
   let pauseRevision=-1;
   let simulationRate=1;
   const rateControl=$('simulation-rate');
+  if(config.model.simulationRates){
+    rateControl.replaceChildren(...config.model.simulationRates.map(rate=>new Option(rate+'×',String(rate))));
+  }
   const actualRate=$('actual-rate');
   let rateAnchor=null;
   let frozenFlights=new Map();
   const currentTick=()=>playing?serverTick+Math.max(0,performance.now()-tickSeen)/1000*model.MODEL.tickRate*simulationRate:frozenTick;
   const activeScope=()=>selected??{x:0,y:0,extent:world.radius};
-  const observed=id=>playing?satellites.get(id)?.observer.state:frozenFlights.get(id);
+  const followsConfirmedPath=()=>dynamic&&simulationRate>config.model.livePathAboveRate;
+  function observed(id){
+    if(!playing)return frozenFlights.get(id);
+    const flight=satellites.get(id);
+    if(!flight)return;
+    if(!followsConfirmedPath())return flight.observer.state;
+    const tick=liveBodyObserver.displayTick(performance.now());
+    if(!Number.isFinite(tick))return flight.state;
+    if(tick<(flight.birthFieldTick??flight.birthTick))return;
+    const sample=flight.confirmed?.sampleAtTick(tick),body=sample?.bodies[0];
+    if(!body)return flight.state;
+    const lag=body.fieldTick-sample.tick;
+    const status=flight.ending&&tick<flight.state.fieldTick?'active':flight.status;
+    return {...body,status,fieldTick:sample.tick,tick:body.tick-lag,
+      elapsedSeconds:body.elapsedSeconds-lag/model.MODEL.tickRate};
+  }
   const flightState=()=>controls.replay?controls.replay.point:observed(selectedFlight);
   const fieldTick=()=>controls.replay
     ? controls.replay.birthTick+controls.replay.time*model.MODEL.tickRate
@@ -476,9 +494,15 @@
     const contactFrame=bodyTrack&&bodyTrack.time===bodyTrack.end?bodyTrack.contactFrame:null;
     const frameBodies=contactFrame?contactFrame.bodies
       :dynamic&&historyTick!==null?historicalBodies(historyTick):visibleBodies(tick);
-    if(historyTick!==null)pendingLiveMerges.length=0;
-    else while(pendingLiveMerges.length&&pendingLiveMerges[0].tick<=liveSample?.tick)
-      addMergeWave(pendingLiveMerges.shift(),null);
+    if(historyTick!==null){
+      pendingLiveMerges.length=0;pendingImpacts.length=0;
+    }else{
+      while(pendingLiveMerges.length&&pendingLiveMerges[0].tick<=liveSample?.tick)
+        addMergeWave(pendingLiveMerges.shift(),null);
+      for(let i=pendingImpacts.length-1;i>=0;i--){
+        if(pendingImpacts[i].tick<=liveSample?.tick)addImpact(pendingImpacts.splice(i,1)[0].impact);
+      }
+    }
     const field=bodyTrack?[
       ...frameBodies.filter(body=>!bodyTrack.segmentIds.has(body.id)),
       {...bodyTrack.body,...bodyTrack.position}
@@ -678,7 +702,7 @@
     if(lastFrame!==null){
       const seconds=(now-lastFrame)/1000,dt=Math.min(seconds,.1);
       if(playing){
-        for(const flight of satellites.values())flight.observer.advance(seconds*simulationRate,{collect:false});
+        if(!followsConfirmedPath())for(const flight of satellites.values())flight.observer.advance(seconds*simulationRate,{collect:false});
         const observedFlight=observed(selectedFlight);
         if(observedFlight?.status==='active'&&observedFlight.tick-trailTick>=12){
           trailTick=observedFlight.tick;
@@ -770,7 +794,7 @@
     if(!value){
       frozenFlights=new Map([...satellites].map(([id,flight])=>[id,{...flight.state,status:flight.status}]));
     }else{
-      for(const flight of satellites.values())flight.observer.accept({...flight.state,status:flight.status});
+      if(!followsConfirmedPath())for(const flight of satellites.values())flight.observer.accept({...flight.state,status:flight.status});
     }
     playing=value;updatePlayback();controls.render();draw();
   }
@@ -933,25 +957,38 @@
     updateCamera();
   });
 
+  function addImpact(impact){
+    impacts.push({...impact,born:visualTime});
+    if(impacts.length>12)impacts.shift();
+  }
   function receive(records){
-    for(const incoming of records){
+    const now=performance.now(),confirmedPath=followsConfirmedPath(),displayTick=liveBodyObserver?.displayTick(now);
+    for(const {livePath,...incoming} of records){
       if(removedFlights.has(incoming.id))continue;
       const old=satellites.get(incoming.id),record=OrbitalHistory.mergeSnapshot(old,incoming);
       if(!record?.state||old&&record.state.tick<old.state.tick)continue;
       if(old&&old.state.tick===record.state.tick&&!['active','queued'].includes(old.status)&&['active','queued'].includes(record.status))continue;
       if(!old)flightSelect.add(new Option(record.name,record.id));
       const observer=old?.observer??OrbitalHistory.createLiveObserver(model);
+      let confirmed=old?.confirmed;
+      const ending=confirmedPath&&record.status!=='active'&&(old?.status==='active'||old?.ending);
       if(record.status==='captured'&&old?.status==='active'&&playing&&!reducedMotion.matches){
         const state=record.state,event=state.event;
         const origin={x:event?.bodyX??0,y:event?.bodyY??0,z:event?.bodyZ??0};
         const body=bodiesAt(state.fieldTick).find(body=>body.id===event?.bodyId);
-        impacts.push({born:visualTime,origin,radius:body?.rs||body?.radius||model.MODEL.rs,
+        const impact={origin,radius:body?.rs||body?.radius||model.MODEL.rs,
           mass:Math.max(.4,Math.min(3,Math.cbrt(record.massKg/1000))),
-          angle:Math.atan2(state.y-origin.y,state.x-origin.x)});
-        if(impacts.length>12)impacts.shift();
+          angle:Math.atan2(state.y-origin.y,state.x-origin.x)};
+        if(ending)pendingImpacts.push({tick:state.fieldTick,impact});
+        else addImpact(impact);
       }
-      if(playing||!old)observer.accept({...record.state,status:record.status});
-      satellites.set(record.id,{...record,observer});
+      if(confirmedPath&&Number.isFinite(record.state.fieldTick)){
+        confirmed??=OrbitalHistory.createBodyFrameObserver();
+        const path=livePath?.map(([tick,x,y,z])=>({tick,positions:[[record.id,x,y,z]]}));
+        confirmed.accept({tick:record.state.fieldTick,catalog:[],bodies:[{...record.state,id:record.id,status:record.status}]},
+          now,{paused:!playing||record.status!=='active'&&!ending,path,fromTick:displayTick});
+      }else if(playing||!old)observer.accept({...record.state,status:record.status});
+      satellites.set(record.id,{...record,observer,confirmed,ending});
       if(!playing)frozenFlights.set(record.id,{...record.state,status:record.status});
     }
     if(!playing){controls.render();draw();}
@@ -979,10 +1016,19 @@
       actualRate.textContent='实际 '+Math.max(0,effective).toFixed(1)+'×';
       rateAnchor={tick:actualTick,at:now};
     }
-    if(rateChanged)lastFrame=null;
+    if(rateChanged){
+      lastFrame=null;
+      for(const flight of satellites.values()){
+        flight.confirmed?.reset();
+        if(followsConfirmedPath()&&rate<=config.model.livePathAboveRate){
+          flight.observer=OrbitalHistory.createLiveObserver(model);
+          flight.observer.accept({...flight.state,status:flight.status});
+        }
+      }
+    }
     simulationRate=rate;rateControl.value=String(rate);
     if(dynamic&&server.bodyField){
-      liveBodyObserver.accept(server.bodyField,now,{paused:server.paused});
+      liveBodyObserver.accept(server.bodyField,now,{paused:server.paused,path:server.bodyLivePath});
       acceptBodyFrame(server.bodyField);
     }
     serverTick=server.tick;
@@ -1500,7 +1546,7 @@
       stream?.close();stream=null;
       pendingLaunch=null;selectedFlight='';lastLaunchedId='';
       liveTrail.length=0;trailTick=-12;
-      satellites.clear();frozenFlights.clear();removedFlights.clear();impacts.length=0;
+      satellites.clear();frozenFlights.clear();removedFlights.clear();impacts.length=0;pendingImpacts.length=0;
       mergeWaves=[];
       flightSelect.options.length=1;
       hiddenFlights=false;setTracking(false);cameraTarget=null;

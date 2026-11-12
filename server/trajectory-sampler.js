@@ -35,7 +35,7 @@ function createSampler(anchor, calibration = SCALE, options = {}) {
   const kinds = new Array(CAPACITY);
   const retained = new Uint8Array(CAPACITY);
   let count = 0;
-  function push(snapshot) {
+  function push(snapshot,kind=snapshot?.kind??'sample') {
     if (count === CAPACITY) throw new RangeError('Sampler block is full; flush before push');
     if (!snapshot || !Number.isSafeInteger(snapshot.tick) || snapshot.tick < 0 ||
         !Number.isFinite(snapshot.elapsedSeconds) || snapshot.elapsedSeconds < 0) {
@@ -46,7 +46,7 @@ function createSampler(anchor, calibration = SCALE, options = {}) {
       throw new RangeError('Sampler snapshots must be ordered by tick and elapsedSeconds');
     }
     for (let field = 0; field < WIDTH; field++) values[offset + field] = snapshot[fields[field]];
-    kinds[count] = snapshot.kind ?? 'sample';
+    kinds[count] = kind;
     count++;
   }
   function snapshotAt(index) {

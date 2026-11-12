@@ -5,7 +5,7 @@
     commonJS ? require('./world-generator.js') : root.OrbitalWorldGenerator);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.OrbitalModel = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function createRuntime(units, generator, world, bodyProvider) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function createRuntime(units, generator, world, bodyProvider, preparedBodies) {
   'use strict';
   // Paczynski–Wiita test particles; scene units, not relativistic geodesics.
   const sweepSpeed=150,sweepSeconds=600,observationRadius=sweepSpeed*sweepSeconds;
@@ -32,7 +32,8 @@
   const MODEL = Object.freeze({
     version: world?'seeded-pw-2d-v1':'pw-2d-v3', mu: world?0:centralMu, rs: world?0:schwarzschildRadius, captureRadius: world?0:69.3,
     tickRate, step: 1 / tickRate, stars, launchReferenceVersion:1, simulationPauseVersion:1, launchPresetVersion:1,
-    simulationRates:Object.freeze([1,2,4,8,16]),
+    simulationRates:Object.freeze(dynamic?[1,2,4,8,16,32,64]:[1,2,4,8,16]),
+    livePathAboveRate:16,
     dynamics: Object.freeze(world?{version:dynamic?'seeded-nbody-v1':'seeded-multi-attractor-v1',maxMassKg:1e30,
       referenceFrame:'world origin; +Y up',approximation:dynamic?'softened Newtonian interacting celestial bodies and passive satellites':'prescribed body orbits, PW black holes and softened Newtonian stars and planets'
     }:{version:'multi-attractor-pw-v1',legacyVersion:'two-body-pw-v1',maxMassKg:1e30,centralMassKg:units.centralMassKg,
@@ -208,7 +209,9 @@
   }
   function stellarBodiesAtTick(fieldTick=0,spatial=false) {
     if(dynamic){
-      const source=bodyProvider?.(fieldTick)??initialField;
+      const supplied=bodyProvider?.(fieldTick);
+      if(preparedBodies&&supplied)return supplied;
+      const source=supplied??initialField;
       if(!dynamicCache.has(source))dynamicCache.set(source,Object.freeze(source.map(body=>Object.freeze({...body,
         massSolar:body.mass??body.massSolar,mu:muPerSolarMass*(body.mass??body.massSolar),
         rs:body.kind==='blackHole'?body.radius:0,collisionRadius:body.radius,softening:generator.N_BODY_SOFTENING}))));
@@ -263,7 +266,7 @@
     for(const star of bodies||stellarBodiesAtTick(fieldTick,z!==undefined)){
       const dx=star.x-x,dy=star.y-y,dz=z===undefined?undefined:star.z-z;
       const distanceSquared=dx*dx+dy*dy+(dz??0)**2+star.softening**2;
-      const distance=star.rs?radiusAt(dx,dy,dz):0;
+      const distance=star.rs&&!dynamic?radiusAt(dx,dy,dz):0;
       const factor=star.rs&&!dynamic?(star.mu+mu)/(Math.max(distance,star.rs)*Math.max(distance-star.rs,star.rs*.05)**2):star.mu/distanceSquared**1.5;
       result.x+=dx*factor;result.y+=dy*factor;
       if(dz!==undefined)result.z+=dz*factor;
@@ -297,10 +300,24 @@
       const b=dynamic?(end[i]?.id===a.id?end[i]:end.find(body=>body.id===a.id)??a):end[i];
       const startX=x-a.x,startY=y-a.y,endX=nx-b.x,endY=ny-b.y;
       const startZ=z===undefined?undefined:z-a.z,endZ=nz===undefined?undefined:nz-b.z;
+      if(dynamic){
+        const reach=a.collisionRadius*(1+1e-12);
+        // An entire relative segment outside the same slab cannot reach the sphere.
+        if((startX>reach&&endX>reach)||(startX< -reach&&endX< -reach)||
+          (startY>reach&&endY>reach)||(startY< -reach&&endY< -reach)||
+          (startZ>reach&&endZ>reach)||(startZ< -reach&&endZ< -reach))continue;
+      }
       const fraction=radiusAt(startX,startY,startZ)<=a.collisionRadius?0:crossing(startX,startY,endX,endY,a.collisionRadius,false,startZ,endZ);
       if(fraction!==null&&(!first||fraction<first.fraction))first={fraction,star:a,endStar:b};
     }
     return first;
+  }
+  const stepEnds=preparedBodies&&dynamic?new WeakMap():null;
+  function hasFiniteEnergy(state,bodies){
+    // Every prepared softened potential is bounded by mu / softening.
+    if(!stepEnds||!bodies?.boundedEnergy)return Number.isFinite(energy(state,bodies));
+    return Number.isFinite(state.x)&&Number.isFinite(state.y)&&Number.isFinite(state.z??0)&&
+      Number.isFinite(state.vx*state.vx+state.vy*state.vy+(state.vz??0)**2);
   }
   function step(s) {
     if (s.status !== 'active') return s;
@@ -308,7 +325,13 @@
     const oldTick = s.tick,multi=s.dynamicsVersion===MODEL.dynamics.version,fieldTick=multi?s.fieldTick:0;
     if(multi&&(!Number.isFinite(fieldTick)||fieldTick<0))return finish(s,'error',0,Number.isSafeInteger(oldTick)&&oldTick>=0?oldTick:0);
     const startStars=multi?stellarBodiesAtTick(fieldTick,spatial):null;
-    if (![s.x, s.y, s.vx, s.vy, s.escapeRadius, energy(s,startStars)].every(Number.isFinite) || (spatial&&![z,s.vz].every(Number.isFinite)) || !Number.isSafeInteger(oldTick) || oldTick < 0 || oldTick >= Number.MAX_SAFE_INTEGER) {
+    const forceVersion=s.dynamicsVersion??MODEL.dynamics.legacyVersion,mu=s.gravitationalMu??MODEL.mu;
+    const previous=stepEnds?.get(s);
+    const sameStart=previous&&previous.fieldTick===fieldTick&&previous.stars===startStars&&previous.mu===mu&&previous.forceVersion===forceVersion&&
+      previous.x===s.x&&previous.y===s.y&&previous.z===s.z&&previous.vx===s.vx&&previous.vy===s.vy&&previous.vz===s.vz;
+    if (![s.x, s.y, s.vx, s.vy, s.escapeRadius].every(Number.isFinite) ||
+      (!sameStart&&!hasFiniteEnergy(s,startStars)) || (spatial&&![z,s.vz].every(Number.isFinite)) ||
+      !Number.isSafeInteger(oldTick) || oldTick < 0 || oldTick >= Number.MAX_SAFE_INTEGER) {
       return finish(s, 'error', 0, Number.isSafeInteger(oldTick) && oldTick >= 0 ? oldTick : 0);
     }
     if(radiusAt(s.x,s.y,s.z)>MODEL.observation.radius)return finish(s,'out_of_observable',0,oldTick);
@@ -317,8 +340,7 @@
       const star=initialStarCollision.star;
       return finish(s,'captured',0,oldTick,{bodyType:star.rs?'black-hole':star.kind??'star',bodyId:star.id,bodyName:star.name,bodyX:star.x,bodyY:star.y,...(spatial?{bodyZ:star.z}:{}),fieldTick});
     }
-    const forceVersion=s.dynamicsVersion??MODEL.dynamics.legacyVersion;
-    const dt = MODEL.step,mu=s.gravitationalMu??MODEL.mu, a = fieldAcceleration(s.x,s.y,fieldTick,mu,forceVersion,startStars,s.z);
+    const dt = MODEL.step,a=sameStart?previous.acceleration:fieldAcceleration(s.x,s.y,fieldTick,mu,forceVersion,startStars,s.z);
     const hx = s.vx + a.x * dt / 2, hy = s.vy + a.y * dt / 2;
     const nx = s.x + hx * dt, ny = s.y + hy * dt;
     const hz=spatial?s.vz+a.z*dt/2:0,nz=z+hz*dt;
@@ -343,7 +365,7 @@
     }
     const b = fieldAcceleration(nx,ny,fieldTick+1,mu,forceVersion,endStars,spatial?nz:undefined), vx = hx + b.x * dt / 2, vy = hy + b.y * dt / 2;
     const next = { x: nx, y: ny, vx, vy,...(spatial?{z:nz,vz:hz+b.z*dt/2}:{}),...(s.gravitationalMu!==undefined?{gravitationalMu:mu,dynamicsVersion:s.dynamicsVersion}:{}),...(multi?{fieldTick:fieldTick+1}:{}) };
-    if (![vx, vy, energy(next,endStars)].every(Number.isFinite)) return finish(s, 'error', 0, oldTick);
+    if (!Number.isFinite(vx)||!Number.isFinite(vy)||!hasFiniteEnergy(next,endStars))return finish(s, 'error', 0, oldTick);
     const nextRadius=radiusAt(nx,ny,next.z);
     if(nextRadius>MODEL.observation.radius){
       const fraction=crossing(s.x,s.y,nx,ny,MODEL.observation.radius,true,z,nz)??1;
@@ -361,11 +383,19 @@
       return finish(s, 'escaped', fraction, oldTick);
     }
     Object.assign(s, next);s.tick = oldTick + 1;s.elapsedSeconds = s.tick / MODEL.tickRate;
+    if(stepEnds&&multi){
+      // The next step starts at this same position in the same cached field frame.
+      const end=previous??{};
+      end.stars=endStars;end.mu=mu;end.forceVersion=forceVersion;end.acceleration=b;
+      end.fieldTick=fieldTick+1;
+      end.x=s.x;end.y=s.y;end.z=s.z;end.vx=s.vx;end.vy=s.vy;end.vz=s.vz;
+      if(!previous)stepEnds.set(s,end);
+    }
     return s;
   }
   function snapshot(s) {
     return { tick: s.tick, elapsedSeconds: s.elapsedSeconds, x: s.x, y: s.y, vx: s.vx, vy: s.vy,...(s.z!==undefined?{z:s.z,vz:s.vz}:{}),
       kind: s.status === 'active' ? 'sample' : s.status };
   }
-  return Object.freeze({ MODEL, createRuntime:(world,bodyProvider)=>createRuntime(units,generator,world,bodyProvider), resolveLaunch, validateLaunch, createState, step, effectiveMu, acceleration, fieldAcceleration, stellarBodiesAtTick, circularSpeed, circularRadiusForPeriod, escapeSpeed, orbitReference, launchPreset, energy, angularMomentum, snapshot });
+  return Object.freeze({ MODEL, createRuntime:(world,bodyProvider,{preparedBodies=false}={})=>createRuntime(units,generator,world,bodyProvider,preparedBodies), resolveLaunch, validateLaunch, createState, step, effectiveMu, acceleration, fieldAcceleration, stellarBodiesAtTick, circularSpeed, circularRadiusForPeriod, escapeSpeed, orbitReference, launchPreset, energy, angularMomentum, snapshot });
 });

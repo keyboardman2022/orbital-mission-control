@@ -141,39 +141,60 @@
     let target=null,from=null,receivedAt=0,duration=200,paused=false,segments=[];
     const position=(body,start,end,f)=>({...body,x:start.x+(end.x-start.x)*f,
       y:start.y+(end.y-start.y)*f,z:start.z+(end.z-start.z)*f});
-    function sample(now){
-      if(!from)return target;
-      const f=Math.max(0,(now-receivedAt)/duration);
-      if(f>=1)return target;
-      if(f===0)return from;
-      const tick=from.tick+(target.tick-from.tick)*f,bodies=[];
-      for(const {body,start,end,birth,death} of segments){
+    function displayTick(now){
+      if(!from)return target?.tick;
+      const f=Math.max(0,Math.min(1,(now-receivedAt)/duration));
+      return from.tick+(target.tick-from.tick)*f;
+    }
+    function sampleAtTick(tick){
+      if(!from||tick>=target.tick)return target;
+      if(tick<=from.tick)return from;
+      const bodies=[];
+      for(const {body,start,end,birth,death,waypoints} of segments){
         if(tick<birth||tick>=death)continue;
-        const t=Math.max(0,Math.min(1,(tick-birth)/(death-birth)));
-        bodies.push(position(body,start,end,t));
+        let left=start,right=end,begin=birth,finish=death;
+        for(const point of waypoints){
+          if(point.tick>=tick){right=point;finish=point.tick;break;}
+          left=point;begin=point.tick;
+        }
+        const t=Math.max(0,Math.min(1,(tick-begin)/(finish-begin)));
+        bodies.push(position(body,left,right,t));
       }
       return {tick,bodies};
     }
+    function sample(now){return sampleAtTick(displayTick(now));}
     function reset(){target=from=null;segments=[];paused=false;}
-    return {sample,reset,accept(frame,now,{paused:freeze=false}={}){
+    return {sample,sampleAtTick,displayTick,reset,accept(frame,now,{paused:freeze=false,path=[],fromTick}={}){
       if(target&&frame.tick<target.tick)return;
       if(!target||freeze){target=frame;from=null;segments=[];receivedAt=now;paused=freeze;return;}
       if(frame.tick===target.tick){if(paused){receivedAt=now;paused=false;}return;}
-      from=sample(now);
+      from=Number.isFinite(fromTick)?sampleAtTick(fromTick):sample(now);
       duration=Math.max(75,Math.min(250,now-receivedAt));
       target=frame;receivedAt=now;paused=false;
       const previous=new Map(from.bodies.map(body=>[body.id,body]));
       const catalog=new Map(frame.catalog.map(body=>[body.id,body]));
+      const paths=new Map();
+      for(const {tick,positions} of path){
+        if(tick<=from.tick||tick>=frame.tick)continue;
+        for(const [id,x,y,z] of positions){
+          let points=paths.get(id);
+          if(!points){points=[];paths.set(id,points);}
+          points.push({tick,x,y,z});
+        }
+      }
       segments=frame.bodies.map(body=>{
         const old=previous.get(body.id),event=catalog.get(body.id);
         previous.delete(body.id);
-        return {body,start:old??event?.mergeOrigin??body,end:body,
-          birth:old?from.tick:Math.max(from.tick,event?.birthTick??frame.tick),death:frame.tick};
+        const birth=old?from.tick:Math.max(from.tick,event?.birthTick??frame.tick);
+        return {body,start:old??event?.mergeOrigin??body,end:body,birth,death:frame.tick,
+          waypoints:paths.get(body.id)?.filter(point=>point.tick>birth)??[]};
       });
       for(const body of previous.values()){
         const event=catalog.get(body.id);
         const merge=frame.catalog.find(entry=>entry.continuedFrom===body.id||entry.absorbedFrom===body.id);
-        segments.push({body,start:body,end:merge?.mergeOrigin??body,birth:from.tick,death:event?.endTick??frame.tick});
+        const death=event?.endTick??frame.tick;
+        segments.push({body,start:body,end:merge?.mergeOrigin??body,birth:from.tick,death,
+          waypoints:paths.get(body.id)?.filter(point=>point.tick<death)??[]});
       }
     }};
   }

@@ -3,9 +3,58 @@ const assert = require('node:assert/strict');
 const {mkdtempSync,rmSync} = require('node:fs');
 const {tmpdir} = require('node:os');
 const {join} = require('node:path');
+const {DatabaseSync} = require('node:sqlite');
 const {startServer} = require('../server/index.js');
 const {createRuntime} = require('../shared/simulation.js');
 const {generateWorld,bodyPositions} = require('../shared/world-generator.js');
+
+test('physics advances while a periodic save waits for disk access, and pause waits for durability', async t=>{
+  const dir=mkdtempSync(join(tmpdir(),'orbital-async-checkpoint-'));
+  const app=await startServer({port:0,dataDir:dir});
+  const blocker=new DatabaseSync(join(dir,'orbital.sqlite'));
+  blocker.exec('PRAGMA busy_timeout=3000');
+  t.after(async()=>{
+    if(blocker.isTransaction)blocker.exec('ROLLBACK');
+    blocker.close();
+    await app.close();
+    rmSync(dir,{recursive:true,force:true});
+  });
+  const headers={'content-type':'application/json'};
+  async function request(path,body){
+    const res=await fetch(app.url+path,{headers,...(body?{method:'POST',body:JSON.stringify(body)}:{})});
+    if(!res.ok)assert.fail(await res.text());
+    return res;
+  }
+  const guest=await request('/api/session/guest',{});
+  headers.cookie=guest.headers.get('set-cookie').split(';')[0];
+  headers['x-csrf-token']=(await guest.json()).csrfToken;
+  const {worldId}=await (await request('/api/worlds',{seed:'concurrent checkpoint',options:{systems:2,stars:6,blackHoles:0}})).json();
+  const query='?worldId='+worldId;
+  const list=()=>request('/api/satellites'+query).then(res=>res.json());
+  await list();
+  blocker.exec('BEGIN IMMEDIATE');
+  let first;
+  for(let i=0;i<40;i++){
+    const current=(await list()).server;
+    if(current.storage.checkpointQueuedTick>current.storage.checkpointSavedTick){first=current;break;}
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  assert.ok(first,'a periodic save reached the storage thread');
+  const pause=request('/api/simulation/pause'+query,{paused:true}).then(res=>res.json());
+  let paused=false;
+  pause.then(()=>{paused=true;},()=>{});
+  await new Promise(resolve=>setTimeout(resolve,130));
+  const moving=(await list()).server;
+  assert.ok(moving.bodyField.tick>first.bodyField.tick);
+  assert.equal(moving.storage.checkpointSavedTick,first.storage.checkpointSavedTick);
+  assert.equal(paused,false);
+  blocker.exec('COMMIT');
+  const {server:frozen}=await pause;
+  const saved=JSON.parse(blocker.prepare('SELECT state FROM body_fields WHERE world_id=?').get(worldId).state);
+  assert.equal(frozen.paused,true);
+  assert.equal(saved.tick,frozen.bodyField.tick);
+  assert.deepEqual(saved.bodies,frozen.bodyField.bodies);
+});
 
 test('seeded dynamics resolve collisions at the generated body location', () => {
   const world = generateWorld('binary launch', {systems: 2, blackHoles: 0});

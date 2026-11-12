@@ -58,15 +58,17 @@
   }
 
   function contactTime(a,b,limit) {
-    const x=b.x-a.x,y=b.y-a.y,z=b.z-a.z;
     const radius=a.radius+b.radius;
-    const gap=x*x+y*y+z*z-radius**2;
-    if (gap<=0) return 0;
-    const vx=b.vx-a.vx,vy=b.vy-a.vy,vz=b.vz-a.vz;
     // A separated axis cannot produce contact unless relative drift can close it.
     const reach=radius*(1+1e-12);
-    if(Math.abs(x)>reach+Math.abs(vx)*limit||Math.abs(y)>reach+Math.abs(vy)*limit||
-      Math.abs(z)>reach+Math.abs(vz)*limit)return Infinity;
+    const x=b.x-a.x,vx=b.vx-a.vx;
+    if(Math.abs(x)>reach+Math.abs(vx)*limit)return Infinity;
+    const y=b.y-a.y,vy=b.vy-a.vy;
+    if(Math.abs(y)>reach+Math.abs(vy)*limit)return Infinity;
+    const z=b.z-a.z,vz=b.vz-a.vz;
+    if(Math.abs(z)>reach+Math.abs(vz)*limit)return Infinity;
+    const gap=x*x+y*y+z*z-radius**2;
+    if (gap<=0) return 0;
     const closing=x*vx+y*vy+z*vz;
     if (closing>=0) return Infinity;
     const discriminant=closing*closing-gap*(vx*vx+vy*vy+vz*vz);
@@ -78,18 +80,24 @@
   function createSimulation(initial, {gravity=G,softening=SOFTENING,startTime=0,
     nextId=1+Math.max(0,...initial.map(body=>body.id).filter(Number.isSafeInteger)),mergeId=id=>id}={}) {
     const bodies = initial.map(body => ({...body})), collisions = [];
+    const softeningSquared=softening*softening;
     let time=startTime;
     function kick(dt) {
       if (!gravity) return;
-      for (let i=0; i<bodies.length; i++) for (let j=i+1; j<bodies.length; j++) {
-        const a=bodies[i],b=bodies[j];
-        const x=b.x-a.x,y=b.y-a.y,z=b.z-a.z;
-        const squared=x*x+y*y+z*z+softening*softening;
-        if (!squared) continue;
-        const impulse=gravity*dt/(squared*Math.sqrt(squared));
-        const towardB=impulse*b.mass,towardA=impulse*a.mass;
-        a.vx+=x*towardB;a.vy+=y*towardB;a.vz+=z*towardB;
-        b.vx-=x*towardA;b.vy-=y*towardA;b.vz-=z*towardA;
+      const scale=gravity*dt;
+      for (let i=0; i<bodies.length-1; i++){
+        const a=bodies[i],ax=a.x,ay=a.y,az=a.z,mass=a.mass;
+        let {vx,vy,vz}=a;
+        for (let j=i+1; j<bodies.length; j++) {
+          const b=bodies[j],x=b.x-ax,y=b.y-ay,z=b.z-az;
+          const squared=x*x+y*y+z*z+softeningSquared;
+          if (!squared) continue;
+          const impulse=scale/(squared*Math.sqrt(squared));
+          const towardB=impulse*b.mass,towardA=impulse*mass;
+          vx+=x*towardB;vy+=y*towardB;vz+=z*towardB;
+          b.vx-=x*towardA;b.vy-=y*towardA;b.vz-=z*towardA;
+        }
+        a.vx=vx;a.vy=vy;a.vz=vz;
       }
     }
     function move(dt) {
