@@ -150,7 +150,8 @@
     size: index % 9 === 0 ? 1.5 : 1, alpha: index % 7 === 0 ? .6 : .22
   }));
   const defaultPitch=41,defaultYaw=-.38;
-  let width=0,height=0,yaw=defaultYaw,pitch=defaultPitch,zoom=1,minZoom=1;
+  let width=0,height=0,yaw=defaultYaw,pitch=defaultPitch,zoom=1,overviewZoom=1,sliderMin=1;
+  let renderedBodies=[],cameraDistance=camera.SPATIAL_DISTANCE;
   let cameraOffset={x:0,y:0},visualTime=0;
   const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)');
   let playing = true, frame = null, lastFrame = null, drag = null;
@@ -183,9 +184,14 @@
       elapsedSeconds:body.elapsedSeconds-lag/model.MODEL.tickRate};
   }
   const flightState=()=>controls.replay?controls.replay.point:observed(selectedFlight);
-  const fieldTick=()=>controls.replay
-    ? controls.replay.birthTick+controls.replay.time*model.MODEL.tickRate
-    : currentTick();
+  function fieldTick(){
+    const replay=controls.replay;
+    if(!replay)return currentTick();
+    const resume=replay.resumePoint;
+    return resume&&replay.time>resume.elapsedSeconds
+      ? resume.fieldTick+(replay.time-resume.elapsedSeconds)*model.MODEL.tickRate
+      : replay.birthTick+replay.time*model.MODEL.tickRate;
+  }
   const bodiesAt=tick=>config.world?model.stellarBodiesAtTick(tick,true):[classicHole,...model.stellarBodiesAtTick(tick,true)];
   function visibleBodies(tick){
     if(!dynamic)return bodiesAt(tick);
@@ -296,7 +302,7 @@
       selector.value='map';
       selector.onchange();
       cameraTarget=origin;
-      if(config.world)zoom=minZoom;
+      if(config.world)zoom=overviewZoom;
       updateCamera();
     },
     receive,remove:removeFlight,observeClock,draw,exactHistory,ensureVisible:()=>{hiddenFlights=false;},
@@ -305,9 +311,15 @@
   });
 
   function projection(atZoom=zoom) {
-    const scope=activeScope(),center=bodyTrack?.position??cameraTarget??scope;
+    const scope=activeScope();
+    let center=bodyTrack?.position??cameraTarget??scope;
+    if(bodyTrack?.position&&bodyTrack.centerOffset){
+      const offset=bodyTrack.centerOffset;
+      center={x:center.x+offset.x,y:center.y+offset.y,z:(center.z??0)+offset.z};
+    }
     // Center on the selected system while keeping the full seeded map in camera space.
     const extent=config.world?world.radius:scope.extent;
+    const distanceFromCenter=cameraDistance;
     const azimuthSin = Math.sin(yaw), azimuthCos = Math.cos(yaw);
     const elevationSin = Math.sin(pitch * radians), elevationCos = Math.cos(pitch * radians);
     const view=camera.view(width,height,atZoom,bodyTrack?.offset??cameraOffset);
@@ -317,14 +329,14 @@
       const horizontal = x * azimuthCos - y * azimuthSin;
       const forward = x * azimuthSin + y * azimuthCos;
       const depth = forward * elevationCos + z * elevationSin;
-      return {horizontal,vertical:forward*elevationSin-z*elevationCos,distance:3.6-depth};
+      return {horizontal,vertical:forward*elevationSin-z*elevationCos,distance:distanceFromCenter-depth,depth};
     };
     const toScreen=point=>{
-      const {horizontal,vertical,distance}=cameraSpace(point);
+      const {horizontal,vertical,distance,depth}=cameraSpace(point);
       if(distance<.06)return null;
-      const scale=view.scale*3.6/distance;
+      const scale=view.scale*(distanceFromCenter/distance);
       return {x:view.cx+horizontal*extent*scale,
-        y:view.cy+vertical*extent*scale,scale,depth:3.6-distance};
+        y:view.cy+vertical*extent*scale,scale,depth};
     };
     const toEdge=(body,point)=>{
       if(point)return camera.edgeMarker(point.x-width/2,point.y-height/2,width,height);
@@ -333,23 +345,25 @@
     };
     function onPlane(px,py,heightKm){
       const z=(units.fromKm(heightKm)-(center.z??0))/extent;
-      const u=(px-view.cx)/(extent*view.scale*3.6),v=(py-view.cy)/(extent*view.scale*3.6);
+      const u=(px-view.cx)/(extent*view.scale*distanceFromCenter),v=(py-view.cy)/(extent*view.scale*distanceFromCenter);
       const denominator=v*elevationCos+elevationSin;
       if(Math.abs(denominator)<1e-7)return null;
-      const distance=(3.6*elevationSin-z)/denominator;
+      const distance=(distanceFromCenter*elevationSin-z)/denominator;
       if(!Number.isFinite(distance)||distance<.06)return null;
-      const horizontal=u*distance,forward=v*distance*elevationSin+(3.6-distance)*elevationCos;
+      const horizontal=u*distance,forward=v*distance*elevationSin+(distanceFromCenter-distance)*elevationCos;
       return {x:center.x+extent*(horizontal*azimuthCos+forward*azimuthSin),
         y:center.y+extent*(forward*azimuthCos-horizontal*azimuthSin)};
     }
-    const sphere=(origin,radius)=>camera.sphereSilhouette(cameraSpace(origin),radius/extent,view,3.6*extent*view.scale);
-    function atFocalDepth(px,py){
-      const horizontal=(px-view.cx)/view.scale,vertical=(py-view.cy)/view.scale;
-      const forward=vertical*elevationSin;
+    const sphere=(origin,radius)=>camera.sphereSilhouette(cameraSpace(origin),radius/extent,view,distanceFromCenter*extent*view.scale);
+    function pointAtDepth(px,py,depth=0){
+      const scale=view.scale*distanceFromCenter/(distanceFromCenter-depth);
+      const horizontal=(px-view.cx)/scale,vertical=(py-view.cy)/scale;
+      const forward=vertical*elevationSin+depth*extent*elevationCos;
       return {x:center.x+horizontal*azimuthCos+forward*azimuthSin,
-        y:center.y+forward*azimuthCos-horizontal*azimuthSin,z:(center.z??0)-vertical*elevationCos};
+        y:center.y+forward*azimuthCos-horizontal*azimuthSin,
+        z:(center.z??0)-vertical*elevationCos+depth*extent*elevationSin};
     }
-    return {toScreen,toEdge,onPlane,sphere,atFocalDepth,view:{...view,center,extent,
+    return {toScreen,toEdge,onPlane,sphere,pointAtDepth,view:{...view,center,extent,cameraDistance:distanceFromCenter,
       azimuth:[azimuthSin,azimuthCos],elevation:[elevationSin,elevationCos]}};
   }
 
@@ -507,32 +521,40 @@
       ...frameBodies.filter(body=>!bodyTrack.segmentIds.has(body.id)),
       {...bodyTrack.body,...bodyTrack.position}
     ]:frameBodies;
+    renderedBodies=field;
     if(!replay&&!bodyTrack&&launchVisible)updateLaunchPosition(field);
     const liveVisible=shown&&['active','escaped'].includes(shown.status);
     const followed=focusedBody?field.find(body=>body.id===focusedBody)
       ??(!replay&&!bodyTrack&&field.find(body=>historyRoots.get(body.id)===historyRoots.get(focusedBody)))
       :tracking&&!hiddenFlights&&(replay||liveVisible)?shown:null;
     if(followed)cameraTarget={x:followed.x,y:followed.y,z:followed.z??0};
-    const pivot=!bodyTrack&&!followed&&drag?.moved&&drag.pivot;
-    if(pivot?.id){
-      const body=field.find(item=>item.id===pivot.id);
-      if(body){
-        const center=cameraTarget??activeScope();
-        cameraTarget={x:center.x+body.x-pivot.x,y:center.y+body.y-pivot.y,
-          z:(center.z??0)+(body.z??0)-(pivot.z??0)};
-        drag.pivot=body;
+    let cameraProjection=projection();
+    // Reserve depth for wide views using a spherical bound, so turning the
+    // camera cannot make a distant body cross an angle-dependent threshold.
+    // Close views keep the lens distance fixed even after the drag is released.
+    if(zoom<=overviewZoom&&(!drag||drag.pan||drag.pick)){
+      const {center,extent}=cameraProjection.view;
+      const pivot=cameraProjection.pointAtDepth(width/2,height/2);
+      const centerReach=Math.hypot(pivot.x-center.x,pivot.y-center.y,pivot.z-(center.z??0))/extent;
+      let reach=0;
+      for(const body of field){
+        reach=Math.max(reach,Math.hypot(body.x-pivot.x,body.y-pivot.y,(body.z??0)-pivot.z)/extent+centerReach);
+      }
+      if(reach>cameraDistance*.75){
+        cameraDistance=reach*2;
+        cameraProjection=projection();
       }
     }
-    let {toScreen,toEdge,sphere,view:spatialView}=projection();
+    let {toScreen,toEdge,sphere,view:spatialView}=cameraProjection;
     if(!bodyTrack&&$('auto-fit').checked&&shown&&!hiddenFlights){
       const point=toScreen(shown);
       if(point){
         const view=camera.view(width,height,zoom,cameraOffset);
         const scale=Math.min(1,width*.40/Math.max(Math.abs(point.x-view.cx),1),
           height*.35/Math.max(Math.abs(point.y-view.cy),1));
-        const nextZoom=Math.max(minZoom,zoom*scale);
+        const nextZoom=camera.clampZoom(zoom*scale);
         if(nextZoom<zoom){zoom=nextZoom;syncZoom();({toScreen,toEdge,sphere,view:spatialView}=projection());}
-        if(scale<1&&nextZoom===minZoom){cameraTarget=shown;({toScreen,toEdge,sphere,view:spatialView}=projection());}
+        if(scale<1&&nextZoom===camera.MIN_ZOOM){cameraTarget=shown;({toScreen,toEdge,sphere,view:spatialView}=projection());}
       }else{cameraTarget=shown;({toScreen,toEdge,sphere,view:spatialView}=projection());}
     }
     ctx.fillStyle = '#070c17';
@@ -688,8 +710,9 @@
     if(!width||!height)return;
     const base=camera.view(width,height,1).scale;
     const overviewMinimum=Math.min(width*.36,height*.33)/(world.radius*base*(3.6/2.6));
-    minZoom=Math.min(camera.MAX_ZOOM,config.world?overviewMinimum:camera.minimumZoom(width,height,world.radius));
-    if(firstLayout)zoom=fitZoom();
+    overviewZoom=Math.min(camera.MAX_ZOOM,config.world?overviewMinimum:camera.minimumZoom(width,height,world.radius));
+    if(firstLayout){sliderMin=overviewZoom/4;zoom=fitZoom();}
+    if(focusedBody||tracking)cameraOffset=viewportCenterOffset();
     updateCamera();
   }
   function stopFrame() {
@@ -736,14 +759,15 @@
     requestFrame();
   }
   function syncZoom(){
-    $('zoom').value = camera.zoomToSlider(zoom,minZoom);
+    if(zoom<sliderMin)sliderMin=camera.clampZoom(zoom/4);
+    $('zoom').value = camera.zoomToSlider(zoom,sliderMin);
     $('zoom-value').textContent = Number((zoom*100).toPrecision(3))+'%';
     const scale=camera.view(width,height,zoom).scale;
     if(scale>0)$('map-scale').textContent=units.formatKm(units.toKm(90/scale))+' / 90 px（视图中心）';
   }
   function updateCamera(redraw=true) {
     if(pitch<-180||pitch>180)pitch=((pitch+180)%360+360)%360-180;
-    zoom = Math.max(minZoom,Math.min(camera.MAX_ZOOM,zoom));
+    zoom = camera.clampZoom(zoom);
     $('pitch').value = Math.round(pitch);
     $('pitch-value').textContent = Math.round(pitch) + '°';
     syncZoom();
@@ -751,7 +775,7 @@
   }
   function fitZoom(){
     if(selected)return config.world?camera.minimumZoom(width,height,selected.extent)*.68:1.2;
-    if(!config.world||!width||!height)return minZoom;
+    if(!config.world||!width||!height)return overviewZoom;
     const {sphere,view}=projection(1);
     return Math.min(...world.systems.map(system=>{
       const outline=sphere(system,system.extent);
@@ -762,13 +786,30 @@
     }));
   }
   function setZoom(value,anchor){
-    const nextZoom=Math.max(minZoom,Math.min(camera.MAX_ZOOM,value));
-    // Tracking already projects the target at the view origin, so keep that origin fixed.
-    if(anchor&&!bodyTrack&&!tracking&&!focusedBody&&width&&height){
-      const view=camera.view(width,height,zoom,cameraOffset);
-      const changed=camera.zoomAt(view,view.scale*nextZoom/zoom,anchor);
-      const base=camera.view(width,height,nextZoom);
-      cameraOffset={x:changed.cx-base.cx,y:changed.cy-base.cy};
+    let nextZoom=camera.clampZoom(value);
+    if(width&&height){
+      const current=projection();
+      const following=Boolean(focusedBody||bodyTrack||tracking);
+      const pivot=!following&&anchor?anchor:{x:current.view.cx,y:current.view.cy};
+      if(nextZoom<zoom&&renderedBodies.length){
+        const points=renderedBodies.map(current.toScreen);
+        const allVisible=scale=>{
+          const ratio=scale/zoom;
+          return points.every(point=>{
+            if(!point)return false;
+            const x=pivot.x+(point.x-pivot.x)*ratio,y=pivot.y+(point.y-pivot.y)*ratio;
+            return x>=0&&x<=width&&y>=0&&y<=height;
+          });
+        };
+        nextZoom=camera.limitZoomOut(zoom,nextZoom,allVisible);
+      }
+      if(nextZoom!==zoom){
+        const base=camera.view(width,height,nextZoom);
+        const shifted=camera.zoomAt(current.view,base.scale,pivot);
+        const offset={x:shifted.cx-base.cx,y:shifted.cy-base.cy};
+        if(bodyTrack)bodyTrack.offset=offset;
+        else cameraOffset=offset;
+      }
     }
     zoom=nextZoom;
     updateCamera();
@@ -780,6 +821,7 @@
     clearBodyFocus();
     $('auto-fit').checked=false;
     cameraTarget=null;
+    cameraDistance=camera.SPATIAL_DISTANCE;
     if(dynamic&&selected){
       const members=bodiesAt(currentTick()).filter(body=>body.systemId===selected.id||systemBodies.get(selected.id).has(body.id));
       if(members.length)cameraTarget=Object.fromEntries(['x','y','z'].map(axis=>[axis,
@@ -819,11 +861,33 @@
   };
   $('reset').onclick = () => {
     if(config.world)selector.value='map';
-    if(bodyTrack)bodyTrack.offset={x:0,y:0};
+    if(bodyTrack){bodyTrack.offset={x:0,y:0};bodyTrack.centerOffset=null;}
     yaw=defaultYaw;pitch=defaultPitch;selector.onchange();
   };
-  $('pitch').oninput = event => {pitch = Number(event.target.value); updateCamera();};
-  $('zoom').oninput = event => {$('auto-fit').checked=false;setZoom(camera.zoomFromSlider(Number(event.target.value),minZoom));};
+  $('pitch').oninput = event => {rotateView(yaw,Number(event.target.value));updateCamera();};
+  $('zoom').oninput = event => {$('auto-fit').checked=false;setZoom(camera.zoomFromSlider(Number(event.target.value),sliderMin));};
+  $('zoom').onchange = event => {
+    if(Number(event.target.value)!==0)return;
+    sliderMin=camera.clampZoom(sliderMin/4);
+    syncZoom();
+  };
+  $('fit-bodies').onclick=()=>{
+    if(!width||!height)return;
+    closeBodyTrack(false);
+    if(controls.replay)controls.leaveReplay();
+    const fit=camera.fitSpatialOverview(visibleBodies(currentTick()),width,height,
+      config.world?world.radius:world.systems[0].extent,overviewZoom);
+    if(!fit)return;
+    selector.value=config.world?'map':'classic';
+    selected=undefined;
+    $('stage-label').textContent=overviewLabel;
+    setTracking(false);
+    clearBodyFocus();
+    $('auto-fit').checked=false;
+    cameraTarget=fit.center;cameraDistance=fit.cameraDistance;
+    cameraOffset=viewportCenterOffset();zoom=fit.zoom;
+    updateCamera();
+  };
   function setMapTool(tool){
     mapTool=tool;
     for(const button of document.querySelectorAll('[data-map-tool]'))button.setAttribute('aria-pressed',String(button.dataset.mapTool===tool));
@@ -840,29 +904,44 @@
     const bounds=canvas.getBoundingClientRect();
     return {x:event.clientX-bounds.left,y:event.clientY-bounds.top};
   }
-  function rotationPivot(pointer){
-    if(bodyTrack||focusedBody||tracking)return null;
-    const {toScreen,atFocalDepth}=projection();
-    const screenCenter={x:width/2,y:height/2};
-    let underPointer,nearCenter;
-    let pointerDistance=Infinity,centerDistance=Infinity;
-    const centerSearchRadius=Math.min(width,height)*.24;
-    for(const body of visibleBodies(fieldTick())){
-      const point=toScreen(body);
-      if(!point)continue;
-      // A black hole's disk can still be visible when its center is offscreen.
-      const visualRadius=body.rs?body.rs*1.65*point.scale*3:planetRadii.has(body.id)
-        ?planetRadii.get(body.id)*point.scale:OrbitalVisuals.stellarAppearance(point.scale,body,starDisplayScale).radius;
-      const reach=body.rs?visualRadius:0;
-      if(point.x+reach<0||point.x-reach>width||point.y+reach<0||point.y-reach>height)continue;
-      const gap=Math.hypot(point.x-pointer.x,point.y-pointer.y);
-      if(gap<Math.max(12,visualRadius)&&gap<pointerDistance){underPointer=body;pointerDistance=gap;}
-      const fromCenter=Math.hypot(point.x-screenCenter.x,point.y-screenCenter.y);
-      if(fromCenter<Math.max(centerSearchRadius,visualRadius)&&fromCenter<centerDistance){
-        nearCenter=body;centerDistance=fromCenter;
+  function viewportCenterOffset(){
+    const view=camera.view(width,height);
+    return {x:width/2-view.cx,y:height/2-view.cy};
+  }
+  function rotationPivot({toScreen,pointAtDepth}){
+    const x=width/2,y=height/2;
+    let depth=0,nearest=Infinity;
+    // Use the foreground depth for close views without moving the screen pivot.
+    if(zoom>overviewZoom){
+      for(const body of renderedBodies){
+        const point=toScreen(body);
+        if(!point)continue;
+        const planetRadius=planetRadii.get(body.id);
+        const reach=Math.max(2,body.rs?body.rs*1.65*point.scale*4:planetRadius!==undefined
+          ?planetRadius*point.scale:OrbitalVisuals.stellarAppearance(point.scale,body,starDisplayScale).radius*2.8);
+        if(point.x+reach<0||point.x-reach>width||point.y+reach<0||point.y-reach>height)continue;
+        const gap=Math.max(0,Math.hypot(point.x-x,point.y-y)-reach);
+        if(gap<nearest||gap===nearest&&point.depth>depth){
+          nearest=gap;
+          depth=point.depth;
+        }
       }
     }
-    return underPointer??nearCenter??atFocalDepth(screenCenter.x,screenCenter.y);
+    return pointAtDepth(x,y,depth);
+  }
+  function rotateView(nextYaw,nextPitch,pivot){
+    if(width&&height&&!focusedBody&&!tracking){
+      const current=projection();
+      const next=camera.orbitTarget(current.view.center,pivot??rotationPivot(current),
+        {yaw,pitch:pitch*radians},{yaw:nextYaw,pitch:nextPitch*radians});
+      if(bodyTrack?.position){
+        const position=bodyTrack.position;
+        bodyTrack.centerOffset={x:next.x-position.x,y:next.y-position.y,z:next.z-(position.z??0)};
+      }else cameraTarget=next;
+    }
+    $('auto-fit').checked=false;
+    yaw=nextYaw;
+    pitch=nextPitch;
   }
   const pinch=camera.createPinchGesture({
     start(){drag=null;},
@@ -875,7 +954,9 @@
     const pick=!bodyTrack&&primary&&mapTool==='pick';
     drag = {id:event.pointerId,x:event.clientX,y:event.clientY,
       primary,pan:event.button!==2&&(!primary||mapTool!=='rotate'),pick,moved:false};
-    if(!drag.pan&&!drag.pick)drag.pivot=rotationPivot(screenPoint(event));
+    if(!drag.pan&&!drag.pick&&width&&height&&!focusedBody&&!tracking){
+      drag.pivot=rotationPivot(projection());
+    }
     if(event.button!==0)event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
   });
@@ -890,14 +971,8 @@
       offset.x+=dx;offset.y+=dy;
     }
     else if(dx||dy){
-      const nextYaw=yaw+dx*.009,nextPitch=pitch+dy*.28;
-      $('auto-fit').checked=false;
-      if(drag.pivot){
-        cameraTarget=camera.orbitTarget(cameraTarget??activeScope(),drag.pivot,
-          {yaw,pitch:pitch*radians},{yaw:nextYaw,pitch:nextPitch*radians});
-      }
-      yaw=nextYaw;
-      pitch=nextPitch;
+      const gain=camera.rotationGain(zoom);
+      rotateView(yaw+dx*.009*gain,pitch+dy*.28*gain,drag.pivot);
     }
     drag.x = event.clientX;
     drag.y = event.clientY;
@@ -944,13 +1019,14 @@
     setZoom(camera.wheelZoom(zoom,event.deltaY,event.deltaMode,height),screenPoint(event));
   }, {passive:false});
   canvas.addEventListener('keydown', event => {
+    const gain=camera.rotationGain(zoom);
     switch (event.key) {
-      case 'ArrowLeft': yaw -= .15; break;
-      case 'ArrowRight': yaw += .15; break;
-      case 'ArrowUp': pitch += 6; break;
-      case 'ArrowDown': pitch -= 6; break;
-      case '+': case '=': $('auto-fit').checked=false;zoom *= 1.1; break;
-      case '-': $('auto-fit').checked=false;zoom /= 1.1; break;
+      case 'ArrowLeft': rotateView(yaw-.15*gain,pitch); break;
+      case 'ArrowRight': rotateView(yaw+.15*gain,pitch); break;
+      case 'ArrowUp': rotateView(yaw,pitch+6*gain); break;
+      case 'ArrowDown': rotateView(yaw,pitch-6*gain); break;
+      case '+': case '=': event.preventDefault();$('auto-fit').checked=false;setZoom(zoom*1.1);return;
+      case '-': event.preventDefault();$('auto-fit').checked=false;setZoom(zoom/1.1);return;
       default: return;
     }
     event.preventDefault();
@@ -967,7 +1043,8 @@
       if(removedFlights.has(incoming.id))continue;
       const old=satellites.get(incoming.id),record=OrbitalHistory.mergeSnapshot(old,incoming);
       if(!record?.state||old&&record.state.tick<old.state.tick)continue;
-      if(old&&old.state.tick===record.state.tick&&!['active','queued'].includes(old.status)&&['active','queued'].includes(record.status))continue;
+      const justResumed=old?.status==='out_of_observable'&&record.status==='active'&&incoming.resumePoint;
+      if(old&&old.state.tick===record.state.tick&&!['active','queued'].includes(old.status)&&['active','queued'].includes(record.status)&&!justResumed)continue;
       if(!old)flightSelect.add(new Option(record.name,record.id));
       const observer=old?.observer??OrbitalHistory.createLiveObserver(model);
       let confirmed=old?.confirmed;
@@ -1102,7 +1179,7 @@
   }
   function setTracking(value){
     tracking=Boolean(value&&selectedFlight);
-    if(tracking){clearBodyFocus();$('auto-fit').checked=false;}
+    if(tracking){clearBodyFocus();$('auto-fit').checked=false;cameraOffset=viewportCenterOffset();}
     const button=$('follow-flight');
     button.setAttribute('aria-pressed',String(tracking));
     button.textContent=tracking?'停止跟踪':'跟踪所选卫星';
@@ -1139,6 +1216,8 @@
     selector.onchange();
     focusedBody=id;
     event.target.value=id;
+    cameraTarget=body;
+    cameraOffset=viewportCenterOffset();
     const radius=body.rs?body.rs*1.65:planetRadii.get(id)??OrbitalVisuals.stellarAppearance(1,body,starDisplayScale).radius;
     const base=camera.view(width,height,1).scale;
     const moonReach=Math.max(0,...(system?.bodies??[]).filter(item=>item.kind==='moon'&&item.orbit.parentId===id)
@@ -1146,10 +1225,7 @@
     if(radius>0&&base>0){
       zoom=moonReach?Math.min(width,height)*.32/(moonReach*base):Math.min(125,width*.14,height*.18)/(radius*base);
     }
-    if(launchReference.value!==id){
-      setLaunchReference(body);
-      keepLaunchInView();
-    }
+    if(launchReference.value!==id)setLaunchReference(body);
     updateCamera();canvas.scrollIntoView({block:'nearest'});
   };
   function closeBodyTrack(redraw=true){
@@ -1163,7 +1239,7 @@
     $('body-history-status').textContent='';
     $('body-history-load').disabled=!bodyHistorySelect.value;
     if(liveView){
-      ({yaw,pitch,zoom,cameraTarget,cameraOffset,selected}=liveView);
+      ({yaw,pitch,zoom,cameraTarget,cameraOffset,cameraDistance,selected}=liveView);
       drag=null;
       selector.value=selected?.id??'map';
       $('stage-label').textContent=selected?'星系近景':overviewLabel;
@@ -1311,7 +1387,7 @@
       if(bodyTrackRequest!==controller||!pageActive)return;
       if(!points.length)throw new Error('当前天体还没有轨迹。');
       controls.leaveReplay();
-      const liveView={yaw,pitch,zoom,cameraTarget,cameraOffset:{...cameraOffset},selected,focusedBody,
+      const liveView={yaw,pitch,zoom,cameraTarget,cameraDistance,cameraOffset:{...cameraOffset},selected,focusedBody,
         trackedFlight:tracking?selectedFlight:null,autoFit:$('auto-fit').checked};
       setTracking(false);clearBodyFocus();$('auto-fit').checked=false;
       const samples=points.map(point=>({...point,elapsedSeconds:point.tick/model.MODEL.tickRate}));
@@ -1359,8 +1435,7 @@
   $('locate-launch').onclick=locateLaunch;
   function keepLaunchInView(){
     if(!launchPosition||!width||!height)return;
-    const {x,y,z}=launchPosition;
-    if(Math.hypot(x,y,z)>model.MODEL.limits.maxRadius)return;
+    if(!Number.isFinite(Math.hypot(launchPosition.x,launchPosition.y,launchPosition.z)))return;
     const point=projection().toScreen(launchPosition);
     if(tracking||$('auto-fit').checked||!point||(!cameraTarget&&point.scale<.03)||
       point.x<24||point.x>width-72||point.y<24||point.y>height-24)locateLaunch();
@@ -1702,9 +1777,7 @@
   setLaunchCoordinate('x',1200);
   setLaunchCoordinate('y',0);
   setLaunchCoordinate('z',150);
-  const observation=model.MODEL.observation;
-  $('observation-3d').textContent='模型 '+model.MODEL.dynamics.version+' · 可观测区域半径 '+units.formatKm(units.toKm(observation.radius))+
-    ' · 卫星越界后归档，可回放和导出。'+(blackHoleLabels.size
+  $('observation-3d').textContent='模型 '+model.MODEL.dynamics.version+' · 卫星飞行轨迹可回放和导出。'+(blackHoleLabels.size
       ? '冲击波以黑洞为中心。可通过天体定位选定黑洞，也可直接使用离当前观察范围中心最近的黑洞。'
       : '这张地图没有黑洞，无法启动冲击波。');
   if(typeof Worker!=='undefined'){

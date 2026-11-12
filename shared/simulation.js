@@ -32,14 +32,14 @@
   const MODEL = Object.freeze({
     version: world?'seeded-pw-2d-v1':'pw-2d-v3', mu: world?0:centralMu, rs: world?0:schwarzschildRadius, captureRadius: world?0:69.3,
     tickRate, step: 1 / tickRate, stars, launchReferenceVersion:1, simulationPauseVersion:1, launchPresetVersion:1,
-    simulationRates:Object.freeze(dynamic?[1,2,4,8,16,32,64]:[1,2,4,8,16]),
+    simulationRates:Object.freeze(dynamic?[1,2,4,8,16,32,64,100]:[1,2,4,8,16]),
     livePathAboveRate:16,
     dynamics: Object.freeze(world?{version:dynamic?'seeded-nbody-v1':'seeded-multi-attractor-v1',maxMassKg:1e30,
       referenceFrame:'world origin; +Y up',approximation:dynamic?'softened Newtonian interacting celestial bodies and passive satellites':'prescribed body orbits, PW black holes and softened Newtonian stars and planets'
     }:{version:'multi-attractor-pw-v1',legacyVersion:'two-body-pw-v1',maxMassKg:1e30,centralMassKg:units.centralMassKg,
       referenceFrame:'satellite position and velocity relative to the fixed central black hole',
       approximation:'finite-mass PW black hole plus prescribed Newtonian stellar attractors; not GR, no star-star or satellite-satellite forces'}),
-    observation:Object.freeze({version:'sweep-10min-v2',sweepSpeed,sweepSeconds,radius:world?.radius??observationRadius,endReason:'out_of_observable'}),
+    observation:Object.freeze({version:'sweep-10min-v2',sweepSpeed,sweepSeconds,radius:world?.radius??observationRadius}),
     limits: Object.freeze({ maxRadius: world?.radius??observationRadius, maxSpeed: 1000, maxMassKg: 1e12, minRadius: world?0:80 }),
     calibration: units?.SCALE,
     units: Object.freeze({ length: 'scene length', time: 'simulation second', mass: 'kg', speed: 'scene length / simulation second', angle: 'degrees; +X = 0, counterclockwise; +Y up' })
@@ -69,7 +69,7 @@
     if(spatial&&input.dynamicsVersion!==MODEL.dynamics.version)fail('3D 发射必须使用当前引力模型',409);
     if (![x, y, massKg, speed, directionDeg].every(Number.isFinite)) fail('All numeric parameters must be finite numbers');
     const r = radiusAt(x,y,spatial?z:undefined), limits = MODEL.limits;
-    if (r < limits.minRadius || r > limits.maxRadius) fail('Position is outside the validated launch range');
+    if (!Number.isFinite(r) || r < limits.minRadius || (!spatial && r > limits.maxRadius)) fail('Position is outside the validated launch range');
     if (holes.some(hole=>radiusAt(x-hole.x,y-hole.y,spatial?z-hole.z:undefined)<=hole.radius*1.05)) fail('位置在黑洞捕获面内，无法发射');
     if (massKg <= 0 || massKg > (input.dynamicsVersion?MODEL.dynamics.maxMassKg:limits.maxMassKg)) fail('Mass is outside the validated range');
     if (speed < 0 || speed > limits.maxSpeed) fail('Speed is outside the validated range');
@@ -85,7 +85,7 @@
     const p = validateLaunch(initial);
     return { x: p.position.x, y: p.position.y, vx: p.vx, vy: p.vy, tick: 0,
       ...(p.dimension===3?{z:p.position.z,vz:p.vz}:{}),
-      status: 'active', elapsedSeconds: 0, escapeRadius: Math.max(1200,radiusAt(p.position.x,p.position.y,p.position.z)*3), event: null,
+      status: 'active', elapsedSeconds: 0, escapeRadius: Math.min(Number.MAX_VALUE,Math.max(1200,radiusAt(p.position.x,p.position.y,p.position.z)*3)), event: null,
       ...(p.dynamicsVersion?{gravitationalMu:effectiveMu(p.massKg),dynamicsVersion:p.dynamicsVersion}:{}),
       ...(p.dynamicsVersion===MODEL.dynamics.version?{fieldTick:Number.isFinite(options.fieldTick)?options.fieldTick:0}:{}),
       ...(options.continuousTracking ? {continuousTracking:true} : {}) };
@@ -183,7 +183,8 @@
   }
   function launchPreset(position,reference,mode){
     const distance=radiusAt(position.x,position.y,position.z);
-    if(!reference||distance<MODEL.limits.minRadius||distance>MODEL.limits.maxRadius)return null;
+    if(!reference||!Number.isFinite(distance)||distance<MODEL.limits.minRadius||
+      (position.z===undefined&&distance>MODEL.limits.maxRadius))return null;
     if(reference.velocity)return spatialLaunchPreset(position,reference,mode);
     const speed=mode==='escape'?reference.escape*1.1:reference.circular*(mode==='infall'?.45:1);
     const radial=Math.atan2(position.y-reference.y,position.x-reference.x);
@@ -286,7 +287,7 @@
   function finish(s, type, fraction, oldTick,extra={}) {
     s.status = type;
     s.tick = oldTick + 1;
-    s.elapsedSeconds = (oldTick + fraction) / MODEL.tickRate;
+    s.elapsedSeconds = (oldTick + fraction) / MODEL.tickRate + (s.elapsedOffset??0);
     if(s.dynamicsVersion===MODEL.dynamics.version)s.fieldTick=extra.fieldTick??s.fieldTick+fraction;
     s.event = { type, substepFraction: fraction, x: s.x, y: s.y,...(s.z!==undefined?{z:s.z}:{}), elapsedSeconds: s.elapsedSeconds,...extra,
       ...(s.dynamicsVersion===MODEL.dynamics.version?{fieldTick:s.fieldTick}:{}) };
@@ -334,7 +335,6 @@
       !Number.isSafeInteger(oldTick) || oldTick < 0 || oldTick >= Number.MAX_SAFE_INTEGER) {
       return finish(s, 'error', 0, Number.isSafeInteger(oldTick) && oldTick >= 0 ? oldTick : 0);
     }
-    if(radiusAt(s.x,s.y,s.z)>MODEL.observation.radius)return finish(s,'out_of_observable',0,oldTick);
     const initialStarCollision=multi?stellarCollision(s.x,s.y,s.x,s.y,fieldTick,fieldTick,startStars,startStars,s.z,s.z):null;
     if(initialStarCollision){
       const star=initialStarCollision.star;
@@ -366,23 +366,13 @@
     const b = fieldAcceleration(nx,ny,fieldTick+1,mu,forceVersion,endStars,spatial?nz:undefined), vx = hx + b.x * dt / 2, vy = hy + b.y * dt / 2;
     const next = { x: nx, y: ny, vx, vy,...(spatial?{z:nz,vz:hz+b.z*dt/2}:{}),...(s.gravitationalMu!==undefined?{gravitationalMu:mu,dynamicsVersion:s.dynamicsVersion}:{}),...(multi?{fieldTick:fieldTick+1}:{}) };
     if (!Number.isFinite(vx)||!Number.isFinite(vy)||!hasFiniteEnergy(next,endStars))return finish(s, 'error', 0, oldTick);
-    const nextRadius=radiusAt(nx,ny,next.z);
-    if(nextRadius>MODEL.observation.radius){
-      const fraction=crossing(s.x,s.y,nx,ny,MODEL.observation.radius,true,z,nz)??1;
-      const boundaryZ=spatial?z+(nz-z)*fraction:undefined;
-      const x=s.x+(nx-s.x)*fraction,y=s.y+(ny-s.y)*fraction,boundaryAcceleration=fieldAcceleration(x,y,fieldTick+fraction,mu,forceVersion,undefined,boundaryZ),h=dt*fraction;
-      Object.assign(s,{x,y,vx:s.vx+(a.x+boundaryAcceleration.x)*h/2,vy:s.vy+(a.y+boundaryAcceleration.y)*h/2});
-      if(spatial){s.z=boundaryZ;s.vz+=(a.z+boundaryAcceleration.z)*h/2;}
-      return finish(s,'out_of_observable',fraction,oldTick,multi?{fieldTick:fieldTick+fraction}:{});
-    }
-    if (!s.continuousTracking && nextRadius >= s.escapeRadius && nx*vx+ny*vy+nz*(next.vz??0)>0 && energy(next)>0) {
+    if (!spatial && !s.continuousTracking && radiusAt(nx,ny) >= s.escapeRadius && nx*vx+ny*vy>0 && energy(next)>0) {
       const fraction = crossing(s.x,s.y,nx,ny,s.escapeRadius,true,z,nz) ?? 1;
       Object.assign(s, { x: s.x + (nx - s.x) * fraction, y: s.y + (ny - s.y) * fraction,
         vx: s.vx + (vx - s.vx) * fraction, vy: s.vy + (vy - s.vy) * fraction });
-      if(spatial){s.z=z+(nz-z)*fraction;s.vz+=(next.vz-s.vz)*fraction;}
       return finish(s, 'escaped', fraction, oldTick);
     }
-    Object.assign(s, next);s.tick = oldTick + 1;s.elapsedSeconds = s.tick / MODEL.tickRate;
+    Object.assign(s, next);s.tick = oldTick + 1;s.elapsedSeconds = s.tick / MODEL.tickRate + (s.elapsedOffset??0);
     if(stepEnds&&multi){
       // The next step starts at this same position in the same cached field frame.
       const end=previous??{};

@@ -15,15 +15,16 @@
     uniform vec2 uElevation;
     uniform float uExtent;
     uniform float uScale;
+    uniform float uCameraDistance;
     uniform float uPointSize;
     void main() {
       vec3 p = ((aHigh-uOriginHigh)+(aLow-uOriginLow))/uExtent;
       float horizontal = p.x*uAzimuth.y-p.y*uAzimuth.x;
       float forward = dot(p.xy,uAzimuth);
       float depth = forward*uElevation.y+p.z*uElevation.x;
-      float distance = 3.6-depth;
+      float distance = uCameraDistance-depth;
       vec2 offset = vec2(horizontal,forward*uElevation.x-p.z*uElevation.y);
-      vec2 screen = uCenter+offset*uExtent*uScale*3.6/max(distance,0.06);
+      vec2 screen = uCenter+offset*uExtent*uScale*(uCameraDistance/max(distance,0.06));
       vec2 clip = screen/uViewport*2.0-1.0;
       gl_Position = distance < 0.06 ? vec4(2.0,2.0,0.0,1.0) : vec4(clip.x,-clip.y,0.0,1.0);
       gl_PointSize = uPointSize;
@@ -134,7 +135,7 @@
       gl.attachShader(next,vertex);gl.attachShader(next,fragment);gl.linkProgram(next);
       if(!gl.getProgramParameter(next,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(next)||'轨迹着色器链接失败');
       program=next;locations={high:gl.getAttribLocation(program,'aHigh'),low:gl.getAttribLocation(program,'aLow'),originHigh:gl.getUniformLocation(program,'uOriginHigh'),originLow:gl.getUniformLocation(program,'uOriginLow'),viewport:gl.getUniformLocation(program,'uViewport'),scale:gl.getUniformLocation(program,'uScale')};
-      if(spatial)for(const name of ['Center','Azimuth','Elevation','Extent','PointSize'])locations[name]=gl.getUniformLocation(program,'u'+name);
+      if(spatial)for(const name of ['Center','Azimuth','Elevation','Extent','CameraDistance','PointSize'])locations[name]=gl.getUniformLocation(program,'u'+name);
       gl.useProgram(program);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
       return true;
     }
@@ -194,6 +195,7 @@
           gl.uniform2f(locations.Azimuth,...view.azimuth);
           gl.uniform2f(locations.Elevation,...view.elevation);
           gl.uniform1f(locations.Extent,view.extent);
+          gl.uniform1f(locations.CameraDistance,view.cameraDistance??3.6);
           gl.uniform1f(locations.PointSize,1.7*dpr);
         }else{
           const origin=worldOrigin(view,width,height);

@@ -10,7 +10,7 @@ function buildSnapshot(stream,data,{selectedId,now=Date.now()}={}){
     const immediate=!old||old.status!==record.status;
     if(!immediate&&!record.livePath&&record.id!==selectedId&&now-old.sentAt<1000)continue;
     satellites.push(!old?record:{id:record.id,state:record.state,status:record.status,endReason:record.endReason,birthTick:record.birthTick,telemetry:record.telemetry,trajectoryCoverage:coverage,
-      ...(record.livePath?{livePath:record.livePath}:{})});
+      ...(record.livePath?{livePath:record.livePath}:{}),...(record.resumePoint?{resumePoint:record.resumePoint}:{})});
     stream.known.set(record.id,{tick:record.state?.tick,status:record.status,coverageStatus:coverage?.status,coverageLastSeq:coverage?.lastSeq,sentAt:now});
   }
   for(const id of stream.known.keys())if(!present.has(id))stream.known.delete(id);

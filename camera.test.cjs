@@ -58,6 +58,30 @@ test('maximum centered view fits the observation radius across viewport sizes',(
  }
 });
 
+test('spatial overview fits bodies far beyond the generated map',()=>{
+  const width=360,height=600,extent=90000,overviewZoom=.004;
+  const points=[{x:-2e8,y:3e8,z:-5e8},{x:6e8,y:-2e8,z:4e8}];
+  const {center,zoom,cameraDistance}=Camera.fitSpatialOverview(points,width,height,extent,overviewZoom);
+  assert.deepEqual(center,{x:2e8,y:5e7,z:-5e7});
+  assert.ok(zoom<overviewZoom/1000);
+  for(const point of points){
+    const depth=(point.z-center.z)/extent;
+    assert.ok(cameraDistance-depth>0,'the camera stays behind every body');
+    const scale=Camera.view(width,height,zoom).scale*cameraDistance/(cameraDistance-depth);
+    assert.ok(Math.abs((point.x-center.x)*scale)<width/2);
+    assert.ok(Math.abs((point.y-center.y)*scale)<height/2);
+  }
+});
+
+test('zoom-out stops at the first frame containing all bodies',()=>{
+  const allVisible=zoom=>zoom<=.002;
+  assert.equal(Camera.limitZoomOut(.03,.01,allVisible),.01);
+  const fitted=Camera.limitZoomOut(.03,.00001,allVisible);
+  assert.ok(fitted<=.002&&fitted>.001999);
+  assert.equal(Camera.limitZoomOut(fitted,.000001,allVisible),fitted);
+  assert.equal(Camera.limitZoomOut(fitted,.03,allVisible),.03);
+});
+
 test('projected positions round-trip at desktop/mobile sizes and every zoom limit',()=>{
   for(const [w,h] of [[1100,700],[500,500]])for(const zoom of [.1,.5,1,2]){
     const view=Camera.view(w,h,zoom);

@@ -2,13 +2,42 @@
 // The same projection drives rendering and pointer-to-world launch positions.
 const OrbitalCamera=(()=>{
   const angle=-.48,tilt=.66,cos=Math.cos(angle),sin=Math.sin(angle);
-  const MAX_ZOOM=64;
+  const MAX_ZOOM=64,MIN_ZOOM=1e-24,SPATIAL_DISTANCE=3.6;
+  const clampZoom=zoom=>Math.max(MIN_ZOOM,Math.min(MAX_ZOOM,zoom));
+  function limitZoomOut(current,requested,allVisible){
+    if(requested>=current)return requested;
+    if(allVisible(current))return current;
+    if(!allVisible(requested))return requested;
+    let fits=requested,clipped=current;
+    for(let i=0;i<24;i++){
+      const middle=Math.sqrt(fits*clipped);
+      if(allVisible(middle))fits=middle;
+      else clipped=middle;
+    }
+    return fits;
+  }
+  function fitSpatialOverview(points,width,height,extent,overviewZoom){
+    if(!points.length)return null;
+    const center={};
+    for(const axis of ['x','y','z']){
+      const positions=points.map(point=>point[axis]??0);
+      center[axis]=Math.min(...positions)/2+Math.max(...positions)/2;
+    }
+    const radius=Math.max(1,...points.map(point=>Math.hypot(
+      point.x-center.x,point.y-center.y,(point.z??0)-center.z)));
+    // Keep the enclosing sphere in front of the lens. With the camera at least
+    // two radii away its nearest points project at most twice the center scale.
+    const cameraDistance=Math.max(SPATIAL_DISTANCE,2*radius/extent);
+    const zoom=clampZoom(Math.min(overviewZoom,Math.min(width,height)*.19/(view(width,height).scale*radius)));
+    return {center,zoom,cameraDistance};
+  }
   function zoomFromSlider(value,min){return min*(MAX_ZOOM/min)**(value/1000);}
   function zoomToSlider(zoom,min){return min===MAX_ZOOM?1000:Math.round(Math.log(zoom/min)/Math.log(MAX_ZOOM/min)*1000);}
   function wheelZoom(zoom,deltaY,deltaMode,height){
     const delta=deltaY*(deltaMode===1?16:deltaMode===2?height:1);
     return zoom*Math.exp(-delta*.001);
   }
+  const rotationGain=zoom=>1/Math.min(32,Math.max(1,4*zoom));
   function view(width,height,zoom=1,offset={x:0,y:0}){
     const size=Math.min(width*1.22,height*1.49)*zoom;
     return {cx:width*.54+offset.x,cy:height*.49+offset.y,size,scale:size/1100};
@@ -105,6 +134,8 @@ const OrbitalCamera=(()=>{
       }
     };
   }
-  return {view,toWorld,toScreen,sphereSilhouette,orbitTarget,zoomAt,pan,followAt,originMarker,edgeMarker,minimumZoom,MAX_ZOOM,zoomFromSlider,zoomToSlider,wheelZoom,createPinchGesture};
+  return {view,toWorld,toScreen,sphereSilhouette,orbitTarget,zoomAt,pan,followAt,originMarker,edgeMarker,minimumZoom,
+    MAX_ZOOM,MIN_ZOOM,SPATIAL_DISTANCE,clampZoom,limitZoomOut,fitSpatialOverview,
+    zoomFromSlider,zoomToSlider,wheelZoom,rotationGain,createPinchGesture};
 })();
 if(typeof module!=='undefined'&&module.exports)module.exports=OrbitalCamera;

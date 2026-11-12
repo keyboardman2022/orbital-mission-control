@@ -159,4 +159,10 @@ test('high-speed streams provide confirmed intermediate points for both stars an
   engine.setSpatialPaused(user,worldId,true);
   engine.advanceTo(21);
   assert.deepEqual(engine.list(user,{worldId,dimension:3,includeLive:true}).server.bodyLivePath,streamed.server.bodyLivePath);
+  assert.equal(engine.setSpatialRate(user,worldId,100).server.simulationRate,100);
+  assert.equal(engine.setSpatialPaused(user,worldId,false).server.bodyField.tick,480);
+  engine.advanceTo(22);
+  const at100=engine.list(user,{worldId,dimension:3,includeLive:true});
+  assert.equal(at100.server.bodyField.tick,580);
+  assert.equal(at100.satellites[0].state.fieldTick,580);
 });

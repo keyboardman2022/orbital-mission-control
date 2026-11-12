@@ -68,11 +68,6 @@ class Engine{
         // Keep all committed coordinates/times; extend tracking only for live records.
         if(!r.state.continuousTracking){r.state.continuousTracking=true;this.dirty.add(r.id);}
         this.records.set(r.id,r);
-        const {x,y,z}=r.state,radius=z===undefined?Math.hypot(x,y):Math.hypot(x,y,z);
-        if(radius>M.MODEL.observation.radius){
-          r.state.event={type:'out_of_observable',substepFraction:0,x:r.state.x,y:r.state.y,...(r.state.z!==undefined?{z:r.state.z}:{}),elapsedSeconds:r.state.elapsedSeconds};
-          this.finish(r,'out_of_observable');continue;
-        }
         if(r.status==='active')this.ensureSampler(r);
       }
     }
@@ -439,6 +434,33 @@ class Engine{
     if(r.birthTick===null){r.status='terminated';r.state.status='terminated';r.endReason='terminated';this.dirty.add(id);}
     else this.finish(r,'terminated');
     if(checkpoint)this.checkpoint();return this.publicRecord(r);
+  }
+  resumeBoundaryFlight(userId,id){
+    const previous=this.owned(userId,id);
+    if(previous.status==='active'&&previous.resumePoint)return this.publicRecord(previous);
+    if(previous.initial.dimension!==3||previous.status!=='out_of_observable'||previous.endReason!=='out_of_observable'){
+      fail(409,'只有旧版越界结束的 3D 卫星可以恢复');
+    }
+    if(this.clockError)fail(503,'服务器时钟异常，暂不能恢复卫星');
+    if(this.records.size>=this.maxActive)fail(503,'当前并发计算容量已满');
+    const info=this.worldInfo(previous.worldId);
+    const field=this.ensureBodyField(userId,previous.worldId,info.world);
+    const fieldTick=field?.tick??this.spatialTick(this.spatialClocks.get(spatialClockKey(userId,previous.worldId)));
+    const {tick,elapsedSeconds,x,y,z}=previous.state;
+    const resumePoint={tick,elapsedSeconds,fieldTick,worldTick:this.tick};
+    const record={...previous,status:'active',endReason:null,resumePoint,eventSeq:previous.eventSeq+1,
+      state:{...previous.state,status:'active',event:null,fieldTick,continuousTracking:true,
+        elapsedOffset:elapsedSeconds-tick/M.MODEL.tickRate}};
+    this.checkpoint();
+    this.transaction(()=>{
+      this.db.prepare('UPDATE satellites SET record=? WHERE id=? AND user_id=?').run(JSON.stringify(record),id,userId);
+      this.db.prepare('INSERT INTO events VALUES (?,?,?)').run(id,record.eventSeq,
+        JSON.stringify({type:'resumed',...resumePoint,x,y,z}));
+    });
+    this.records.set(id,record);
+    if(previous.worldId)this.recordRuntimes.set(record,field?.runtime??info.runtime);
+    this.ensureSampler(record);
+    return this.publicRecord(record);
   }
   terminateMany(userId,ids,worldId,dimension=2){
     this.worldInfo(worldId);

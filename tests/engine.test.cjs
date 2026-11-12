@@ -8,7 +8,7 @@ const {archiveBatch,archivePath}=require('../server/trajectory-store.js');
 const launch={name:'Voyager',position:{x:330,y:0},massKg:1000,speed:97.31236802019037,directionDeg:90,modelVersion:'pw-2d-v3',dynamicsVersion:'multi-attractor-pw-v1',idempotencyKey:'test-request-0001'};
 function fixture(t){const dir=mkdtempSync(join(tmpdir(),'orbital-engine-')),engines=[];t.after(()=>{for(const e of engines)e.close();rmSync(dir,{recursive:true,force:true});});let now=100000;const file=join(dir,'test.sqlite');const make=()=>{const e=new Engine({filename:file,now:()=>now});engines.push(e);return e;};return {file,make,setNow:n=>now=n};}
 
-test('observable boundary is ten times farther while shockwave speed stays fixed',()=>{
+test('the former radius still sizes the sweep, and 3D launches can start beyond it',()=>{
  const M=require('../shared/simulation.js'),S=require('../shared/map-sweep.js');
  const wave=S.create({ids:[],origin:{x:0,y:0},extent:100000});wave.advance(60);
  assert.equal(wave.radius,9000);
@@ -16,35 +16,75 @@ test('observable boundary is ten times farther while shockwave speed stays fixed
  assert.equal(M.MODEL.observation.sweepSeconds,600);
  wave.advance(540);assert.equal(M.MODEL.observation.radius,wave.radius);
  assert.throws(()=>M.validateLaunch({...launch,position:{x:90001,y:0}}),{status:422});
+ const far={...launch,dimension:3,pitchDeg:0,position:{x:180000,y:0,z:0}};
+ assert.equal(M.validateLaunch(far).position.x,180000);
+ const preset=M.resolveLaunch({...far,referenceBodyId:'black-hole',launchPreset:'orbit'},0);
+ assert.equal(M.validateLaunch(preset).position.x,180000);
 });
 
-test('outward boundary crossing freezes at the boundary and retains terminal trajectory and export',t=>{
+test('a 3D satellite keeps flying and recording after crossing the former map radius',t=>{
  const f=fixture(t),e=f.make(),u=e.guest().user.id;
- const p=e.launch(u,{...launch,position:{x:89999.9,y:0},speed:200,directionDeg:0,idempotencyKey:'observable-exit'});
- e.advanceTo(10);e.checkpoint();const end=e.get(u,p.id);
- assert.equal(end.status,'out_of_observable');assert.equal(end.endReason,'out_of_observable');
- assert.ok(Math.abs(Math.hypot(end.state.x,end.state.y)-90000)<1e-8);
- assert.ok(end.state.elapsedSeconds>0&&end.state.elapsedSeconds<1/240);
- assert.equal(e.active(u).satellites.length,0);
+ const p=e.launch(u,{...launch,dimension:3,pitchDeg:90,position:{x:0,y:0,z:89999.9},speed:200,
+   directionDeg:0,idempotencyKey:'observable-exit'});
+ e.advanceTo(10);e.checkpoint();const running=e.get(u,p.id);
+ assert.equal(running.status,'active');assert.equal(running.endReason,null);
+ assert.ok(running.state.z>90000);
+ assert.equal(running.state.tick,10);
+ assert.equal(e.active(u,null,3).satellites.length,1);
  const points=e.trajectory(u,p.id,{limit:1000}).points;
- assert.equal(points[0].kind,'birth');assert.equal(points.at(-1).kind,'out_of_observable');
+ assert.equal(points[0].kind,'birth');assert.equal(points.at(-1).kind,'sample');
+ assert.ok(points.at(-1).z>90000);
  const events=e.db.prepare('SELECT event FROM events WHERE satellite_id=? ORDER BY seq').all(p.id).map(r=>JSON.parse(r.event));
- assert.equal(events.at(-1).type,'out_of_observable');
- assert.equal(e.prepareExport(u,p.id,'json').satellite.endReason,'out_of_observable');
- e.advanceTo(100);e.checkpoint();assert.deepEqual(e.get(u,p.id).state,end.state);
- e.close();assert.deepEqual(f.make().get(u,p.id).state,end.state);
+ assert.deepEqual(events.map(event=>event.type),['birth']);
+ assert.equal(e.prepareExport(u,p.id,'json').satellite.status,'active');
+ e.close();
+ const restored=f.make();
+ assert.deepEqual(restored.get(u,p.id).state,running.state);
+ restored.advanceTo(100);
+ assert.ok(restored.get(u,p.id).state.z>running.state.z);
 });
 
-test('restart archives already distant live satellites without rewriting existing history',t=>{
+test('historic out-of-observable records remain archived and exportable',t=>{
  const f=fixture(t),e=f.make(),u=e.guest().user.id,p=e.launch(u,launch);
- const r=e.records.get(p.id);r.state.x=95000;r.state.vx=100;r.state.tick=240;r.state.elapsedSeconds=1;e.dirty.add(p.id);e.checkpoint();
+ const r=e.records.get(p.id);
+ Object.assign(r.state,{x:95000,vx:100,tick:240,elapsedSeconds:1});
+ e.finish(r,'out_of_observable');e.checkpoint();
  const before=e.trajectory(u,p.id,{limit:1000}).points;e.close();
  const restored=f.make(),end=restored.get(u,p.id);
  assert.equal(end.status,'out_of_observable');assert.equal(restored.active(u).satellites.length,0);
  assert.equal(end.state.x,95000);assert.equal(end.state.elapsedSeconds,1);
  const after=restored.trajectory(u,p.id,{limit:1000}).points;
- assert.deepEqual(after.slice(0,before.length),before);assert.equal(after.at(-1).kind,'out_of_observable');
- restored.close();const again=f.make();assert.equal(again.trajectory(u,p.id,{limit:1000}).points.length,after.length);
+ assert.deepEqual(after,before);assert.equal(after.at(-1).kind,'out_of_observable');
+ assert.equal(restored.prepareExport(u,p.id,'json').satellite.endReason,'out_of_observable');
+});
+
+test('an old boundary flight can resume from its exact endpoint on the current 3D clock',t=>{
+ const f=fixture(t),e=f.make(),u=e.guest().user.id;
+ const {worldId}=e.registerWorld({seed:'resume boundary',options:{layout:'spatial-v8',systems:2,stars:6,blackHoles:0}});
+ const p=e.launch(u,{...launch,worldId,modelVersion:'seeded-pw-2d-v1',dynamicsVersion:'seeded-nbody-v1',
+   dimension:3,pitchDeg:0,position:{x:95000,y:0,z:0}});
+ const saved=e.records.get(p.id);
+ Object.assign(saved.state,{tick:1,fieldTick:.4,elapsedSeconds:.4/240,event:{type:'out_of_observable'}});
+ e.finish(saved,'out_of_observable');e.checkpoint();
+ const old=e.get(u,p.id).state;
+ const oldPoints=e.trajectory(u,p.id,{}).points;
+ e.advanceTo(100);
+ const continued=e.resumeBoundaryFlight(u,p.id);
+ assert.equal(continued.status,'active');
+ assert.equal(continued.endReason,null);
+ assert.deepEqual(continued.resumePoint,{tick:1,elapsedSeconds:.4/240,fieldTick:100,worldTick:100});
+ assert.equal(continued.state.x,old.x);
+ assert.equal(continued.state.vx,old.vx);
+ assert.equal(e.resumeBoundaryFlight(u,p.id).resumePoint.worldTick,100);
+ e.close();
+ const restored=f.make();
+ restored.advanceTo(101);
+ const state=restored.get(u,p.id).state;
+ assert.equal(state.status,'active');
+ assert.equal(state.fieldTick,101);
+ assert.ok(Math.abs(state.elapsedSeconds-old.elapsedSeconds-1/240)<1e-12);
+ assert.deepEqual(restored.trajectory(u,p.id,{}).points.slice(0,oldPoints.length),oldPoints);
+ assert.equal(restored.prepareExport(u,p.id,'json').cutoffEventSeq,3);
 });
 test('launch is owned, durable and idempotent; conflicting retry is rejected',t=>{
  const f=fixture(t),e=f.make();t.after(()=>e.close());const a=e.guest(),b=e.guest();

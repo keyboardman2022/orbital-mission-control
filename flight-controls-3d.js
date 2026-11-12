@@ -217,7 +217,8 @@ const OrbitalFlightControls3D = (() => {
       const coverage=record.trajectoryCoverage;
       const elapsedSeconds=coverage?.endElapsedSeconds??record.state.elapsedSeconds;
       replay={id:record.id,tick:coverage?.endTick??record.state.tick,elapsedSeconds,endSeconds:elapsedSeconds,
-        birthTick:record.birthFieldTick??record.birthTick??0,time:0,point:null,cache:history.createCache(),overview:[],playing:false};
+        birthTick:record.birthFieldTick??record.birthTick??0,resumePoint:record.resumePoint,
+        time:0,point:null,cache:history.createCache(),overview:[],playing:false};
       $('timeline-3d').max=elapsedSeconds;
       $('replay-3d').hidden=false;
       void seek(0);
@@ -320,8 +321,11 @@ const OrbitalFlightControls3D = (() => {
         if(observeClock(result.server))receive(result.satellites);
         await resumeLive();
         if(sweep!==session)return;
-        // Include the farthest edge of the observable sphere even when starting off center.
-        const extent=model.MODEL.observation.radius+Math.hypot(origin.x,origin.y,origin.z);
+        let extent=model.MODEL.observation.radius+Math.hypot(origin.x,origin.y,origin.z);
+        for(const {state} of result.satellites){
+          const distance=Math.hypot(state.x-origin.x,state.y-origin.y,(state.z??0)-origin.z);
+          if(Number.isFinite(distance))extent=Math.max(extent,distance);
+        }
         session.wave=OrbitalSweep.create({ids:result.satellites.map(record=>record.id),
           origin,extent,speed:extent/sweepSeconds});
         frameSweep(origin);
