@@ -23,28 +23,33 @@ storage.on('error',fatal);
 storage.on('exit',code=>{
   if(!stopped)fatal(new Error('存档线程已停止（'+code+'）'));
 });
-function saveInBackground(mono,archive){
+function saveInBackground(mono,archive,mapSwitch,onProgress){
   const started=performance.now(),batch=engine.captureCheckpoint(),receipt=engine.checkpointReceipt(batch);
-  pendingStorage=new Promise(resolve=>{
-    finishStorage=()=>{pendingStorage=null;finishStorage=null;resolve();};
+  const job=pendingStorage=new Promise(resolve=>{
+    finishStorage=result=>{pendingStorage=null;finishStorage=null;resolve(result);};
   });
-  storage.once('message',result=>{
+  function receive(result){
+    if(result.progress){onProgress?.(result.progress);return;}
+    storage.off('message',receive);
     if(result.error){fatal(new Error(result.error));return;}
     engine.completeCheckpoint(receipt,result.checkpointMs);
+    if(result.switched)engine.applyMapSwitch(mapSwitch);
     if(archive){
       engine.metrics.archivedPoints+=result.archivedPoints;
       engine.metrics.archiveMs=result.archiveMs;
       engine.metrics.archiveError=result.archiveError;
     }
-    finishStorage();
-  });
-  storage.postMessage({batch,...(archive?{cutoffWorldTick:batch.clock.tick-86400*M.MODEL.tickRate}:{})});
+    finishStorage(result);
+  }
+  storage.on('message',receive);
+  storage.postMessage({batch,mapSwitch,...(archive?{cutoffWorldTick:batch.clock.tick-86400*M.MODEL.tickRate}:{})});
   // postMessage has already copied the batch. Only one batch can be in flight.
   engine.releaseCheckpoint();
   engine.metrics.checkpointCaptureMs=performance.now()-started;
   engine.metrics.checkpointQueuedTick=batch.clock.tick;
   lastCommit=mono;
   if(archive)lastArchive=mono;
+  return job;
 }
 // Give high-rate maps more turns and cap how long any turn can block RPCs.
 const pollMs=8;
@@ -73,7 +78,7 @@ parentPort.on('message',async({id,method,args=[]})=>{
     if(method==='close'){stopped=true;clearInterval(timer);}
     // Serialize SQLite writers, including auto-checkpointing. Read-only SSE
     // requests on existing maps can proceed while the storage worker commits.
-    if(needsStorage)await pendingStorage;
+    if(needsStorage)while(pendingStorage)await pendingStorage;
     if(storageFailed)throw new Error('存档线程不可用');
     let result;
     if(method==='close'){
@@ -84,7 +89,17 @@ parentPort.on('message',async({id,method,args=[]})=>{
     }
     else {
       if(stopped||!allowed.has(method))throw new Error('未知内部指令或服务正在关闭');
-      result=engine[method](...args);
+      if(method==='switchMap'){
+        const plan=engine.prepareMapSwitch(...args);
+        if(plan.result)result=plan.result;
+        else{
+          const saved=await saveInBackground(performance.now(),false,plan,
+            progress=>parentPort.postMessage({id,progress}));
+          if(!saved)throw new Error('存档线程不可用');
+          if(saved.switchError)throw Object.assign(new Error(saved.switchError.message),{status:saved.switchError.status});
+          result=saved.switched;
+        }
+      }else result=engine[method](...args);
     }
     parentPort.postMessage({id,result});
   }catch(error){parentPort.postMessage({id,error:{message:error.message,status:error.status||500}});}

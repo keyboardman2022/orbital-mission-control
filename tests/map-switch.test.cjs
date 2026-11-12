@@ -6,6 +6,7 @@ const {join}=require('node:path');
 const {tmpdir}=require('node:os');
 const {randomUUID}=require('node:crypto');
 const {Engine}=require('../server/engine.js');
+const {DatabaseSync}=require('node:sqlite');
 const {startServer}=require('../server/index.js');
 
 test('switching maps removes only the prior map’s records for the current account and can be retried',async t=>{
@@ -84,4 +85,54 @@ test('switching maps removes only the prior map’s records for the current acco
   assert.equal((await change({...switchTo,toWorldId:null})).status,409);
   assert.equal((await change({fromWorldId:null,toWorldId:destination,switchId:randomUUID()})).status,200);
   assert.equal((await request('/api/satellites/'+classic.id)).status,404);
+});
+
+test('map entry streams real deletion progress while a blocked writer leaves health responsive',async t=>{
+  const dataDir=mkdtempSync(join(tmpdir(),'orbital-map-progress-')),filename=join(dataDir,'orbital.sqlite');
+  const engine=new Engine({filename});
+  const guest=engine.guest();
+  const options={layout:'spatial-v8',systems:2,stars:6,blackHoles:0};
+  const fromWorldId=engine.registerWorld({seed:'many tracks',options}).worldId;
+  const toWorldId=engine.registerWorld({seed:'new destination',options}).worldId;
+  const field=engine.ensureBodyField(guest.user.id,fromWorldId);
+  const id=field.currentBodies()[0].id;
+  engine.db.prepare(`WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i<20000)
+    INSERT INTO body_tracks SELECT ?,?,?,i*480,0,0,0,0,0,0 FROM seq`).run(guest.user.id,fromWorldId,id);
+  engine.close();
+  const app=await startServer({port:0,dataDir});
+  const blocker=new DatabaseSync(filename);
+  t.after(async()=>{
+    if(blocker.isTransaction)blocker.exec('ROLLBACK');
+    blocker.close();
+    await app.close();
+    rmSync(dataDir,{recursive:true,force:true});
+  });
+  blocker.exec('PRAGMA busy_timeout=3000; BEGIN IMMEDIATE');
+  const response=await fetch(app.url+'/api/worlds/switch',{
+    method:'POST',headers:{cookie:'orbital_session='+guest.token,'x-csrf-token':guest.csrfToken,
+      'content-type':'application/json',accept:'application/x-ndjson'},
+    body:JSON.stringify({fromWorldId,toWorldId,switchId:randomUUID()})
+  });
+  assert.equal(response.status,200);
+  assert.match(response.headers.get('content-type'),/application\/x-ndjson/);
+  const reader=response.body.getReader(),decoder=new TextDecoder();
+  let text=decoder.decode((await reader.read()).value,{stream:true});
+  assert.match(text,/"stage":"waiting"/);
+  const health=await fetch(app.url+'/health',{signal:AbortSignal.timeout(1500)});
+  assert.equal((await health.json()).status,'running');
+  blocker.exec('ROLLBACK');
+  for(;;){
+    const chunk=await reader.read();
+    if(chunk.done)break;
+    text+=decoder.decode(chunk.value,{stream:true});
+  }
+  text+=decoder.decode();
+  const updates=text.trim().split('\n').map(line=>JSON.parse(line));
+  const tracks=updates.filter(update=>update.stage==='tracks');
+  assert.ok(tracks[0].total>=20000);
+  assert.equal(tracks[0].removed,0);
+  assert.equal(tracks.at(-1).removed,tracks[0].total);
+  assert.ok(updates.some(update=>update.stage==='commit'));
+  assert.equal(updates.at(-1).stage,'done');
+  assert.equal(blocker.prepare('SELECT count(*) n FROM body_tracks WHERE world_id=?').get(fromWorldId).n,0);
 });

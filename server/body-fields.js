@@ -150,7 +150,6 @@ class BodyFields{
   }
   get(userId,worldId){return this.fields.get(key(userId,worldId));}
   forget(userId,worldId){this.fields.delete(key(userId,worldId));}
-  deleteRows(userId,worldId){this.db.prepare('DELETE FROM body_fields WHERE user_id=? AND world_id=?').run(userId,worldId);}
   checkpointFields(){
     const batch=[];
     for(const field of this.fields.values())if(field.dirty){

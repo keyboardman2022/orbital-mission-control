@@ -10,6 +10,7 @@
   const result = document.getElementById('map-result');
   const template = document.getElementById('map-template');
   const status = document.getElementById('generation-status');
+  const entryProgress = document.getElementById('map-entry-progress');
   const error = document.getElementById('generation-error');
   const form = document.getElementById('seed-form');
   const input = document.getElementById('seed');
@@ -353,11 +354,48 @@
     input.value = `ORB-${Array.from(parts, part => part.toString(36)).join('-')}`;
     generate();
   });
+  async function readSwitchProgress(response){
+    if(!response.ok)throw new Error((await response.json()).error?.message||'原地图数据未能清理。');
+    if(!response.headers.get('content-type')?.startsWith('application/x-ndjson'))return;
+    const reader=response.body.pipeThrough(new TextDecoderStream()).getReader();
+    let pending='',finished=false;
+    try{
+      for(;;){
+        const {value,done}=await reader.read();
+        if(done)break;
+        const lines=(pending+value).split('\n');
+        pending=lines.pop();
+        for(const line of lines){
+          if(!line)continue;
+          const {stage,removed,total,message}=JSON.parse(line);
+          if(stage==='waiting')status.textContent='正在等待存档线程…';
+          if(stage==='counting')status.textContent='正在统计旧地图的轨迹…';
+          if(stage==='tracks'){
+            entryProgress.value=15+65*(total?removed/total:1);
+            status.textContent=`正在清理轨迹 · ${removed.toLocaleString('zh-CN')} / ${total.toLocaleString('zh-CN')}`;
+          }
+          if(stage==='commit'){
+            entryProgress.value=82;
+            status.textContent='正在提交清理结果…';
+          }
+          if(stage==='files'){
+            entryProgress.value=85+13*(total?removed/total:1);
+            status.textContent='正在清理归档和导出文件…';
+          }
+          if(stage==='done')finished=true;
+          if(stage==='error')throw new Error(message);
+        }
+      }
+    }finally{reader.releaseLock();}
+    if(!finished)throw new Error('清理连接已中断，请重试进入地图。');
+  }
   play.addEventListener('click', async () => {
     if (!form.reportValidity()) return;
     const configuration = generate();
     if (!configuration) return;
     play.disabled = true;
+    entryProgress.hidden=false;
+    entryProgress.value=5;
     status.textContent = '正在准备任务控制台…';
     try {
       let {worldId} = configuration;
@@ -371,6 +409,7 @@
       }
       const fromWorldId = sourceMap();
       if (fromWorldId !== undefined && fromWorldId !== worldId) {
+        entryProgress.value=12;
         status.textContent = '正在清理原地图的数据…';
         const session = await fetch('/api/session');
         const credentials = await session.json();
@@ -379,10 +418,12 @@
           switchIntent = {fromWorldId,toWorldId:worldId,switchId:crypto.randomUUID()};
         }
         const response = await fetch('/api/worlds/switch', {method:'POST',
-          headers:{'Content-Type':'application/json','X-CSRF-Token':credentials.csrfToken},
+          headers:{'Content-Type':'application/json','X-CSRF-Token':credentials.csrfToken,Accept:'application/x-ndjson'},
           body:JSON.stringify(switchIntent)});
-        if (!response.ok) throw new Error((await response.json()).error?.message || '原地图数据未能清理。');
+        await readSwitchProgress(response);
       }
+      entryProgress.value=100;
+      status.textContent='正在打开地图…';
       pageUrl.searchParams.set('worldId', worldId);
       pageUrl.searchParams.delete('from');
       history.replaceState(history.state, '', pageUrl);
@@ -391,6 +432,7 @@
       error.textContent = `进入地图失败。 ${failure.message}`;
       error.hidden = false;
       status.textContent = '';
+      entryProgress.hidden=true;
     } finally {
       play.disabled = false;
     }

@@ -7,6 +7,7 @@ const {generateWorld,N_BODY_MOTION}=require('../shared/world-generator.js');
 const {BodyFields,DETAIL_WINDOW_TICKS,LIVE_PATH_INTERVAL,LIVE_PATH_LIMIT}=require('./body-fields.js');
 const {createSampler,POLICY}=require('./trajectory-sampler.js');
 const {createCheckpointStore}=require('./checkpoint-store.js');
+const {removeSatelliteRows,writeMapSwitch}=require('./map-cleanup.js');
 const Budget=require('./trajectory-budget.js');
 const {initializeStore,readPoints,archiveBatch,archivePath}=require('./trajectory-store.js');
 const {statSync,unlinkSync}=require('node:fs');
@@ -469,61 +470,49 @@ class Engine{
     for(const id of unique){const record=this.owned(userId,id);if((record.worldId??null)!==(worldId??null)||(record.initial.dimension??2)!==dimension)fail(404,'当前地图中找不到该卫星');}
     const satellites=unique.map(id=>this.terminate(userId,id,{checkpoint:false}));this.checkpoint();return {satellites,server:this.health()};
   }
-  removeSatelliteRows(userId,ids){
-    const archives=[],exportIds=[];
-    const findArchives=this.db.prepare('SELECT file FROM trajectory_chunks WHERE satellite_id=?');
-    const findExports=this.db.prepare('SELECT id FROM exports WHERE satellite_id=?');
-    const removeChildren=['exports','events','points','trajectory_chunks'].map(table=>
-      this.db.prepare(`DELETE FROM ${table} WHERE satellite_id=?`));
-    const remove=this.db.prepare('DELETE FROM satellites WHERE id=? AND user_id=?');
-    for(const id of ids){
-      for(const row of findArchives.iterate(id))archives.push(row.file);
-      for(const row of findExports.iterate(id))exportIds.push(row.id);
-      for(const statement of removeChildren)statement.run(id);
-      const removed=remove.run(id,userId);
-      if(removed.changes!==1)fail(404,'找不到该卫星');
-    }
-    return {archives,exportIds};
-  }
   forgetSatellites(ids){
     for(const id of ids){this.records.delete(id);this.samplers.delete(id);this.dirty.delete(id);}
   }
   deleteSatellite(userId,id){
     this.owned(userId,id);this.checkpoint();
-    const {archives,exportIds}=this.transaction(()=>this.removeSatelliteRows(userId,[id]));
+    const {archives,exportIds}=this.transaction(()=>removeSatelliteRows(this.db,userId,[id]));
     this.forgetSatellites([id]);
     const archiveCleanupFailures=[];
     for(const file of archives)try{unlinkSync(archivePath(this.filename,file));}catch(error){if(error.code!=='ENOENT')archiveCleanupFailures.push(file);}
     return {id,exportIds,archiveCleanupFailures};
   }
-  switchMap(userId,{fromWorldId,toWorldId,switchId}){
+  prepareMapSwitch(userId,{fromWorldId,toWorldId,switchId}){
     if(fromWorldId===undefined||toWorldId===undefined||typeof switchId!=='string'||
       !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(switchId))fail(422,'无效的地图切换请求');
     const prior=this.db.prepare('SELECT * FROM map_switches WHERE user_id=? AND id=?').get(userId,switchId);
     if(prior){
       if(prior.from_world!==fromWorldId||prior.to_world!==toWorldId)fail(409,'切换请求已用于其他地图');
-      return {deleted:prior.deleted,cleanup:prior.cleanup&&JSON.parse(prior.cleanup)};
+      return {result:{deleted:prior.deleted,cleanup:prior.cleanup&&JSON.parse(prior.cleanup)}};
     }
     this.worldInfo(fromWorldId);this.worldInfo(toWorldId);
-    if(fromWorldId===toWorldId)return {deleted:0,cleanup:null};
-    this.checkpoint();
+    if(fromWorldId===toWorldId)return {result:{deleted:0,cleanup:null}};
     const ids=this.db.prepare(`SELECT s.id FROM satellites s LEFT JOIN satellite_worlds sw ON sw.satellite_id=s.id
       WHERE s.user_id=? AND sw.world_id IS ? AND json_extract(s.record,'$.initial.dimension')=3`).all(userId,fromWorldId).map(row=>row.id);
     const clockKey=spatialClockKey(userId,fromWorldId),previousClock=this.spatialClocks.get(clockKey);
     // Reset the old map's pause without letting connected clients discard the new clock revision.
     const clock=previousClock&&{offset:0,pausedAt:null,revision:previousClock.revision+1};
-    const cleanup=this.transaction(()=>{
-      const files=this.removeSatelliteRows(userId,ids);
-      this.bodyFields.deleteRows(userId,fromWorldId);
-      if(clock)this.store.writeClock(clockKey,clock);
-      const work=ids.length||clock?{ids,...files}:null;
-      this.db.prepare('INSERT INTO map_switches VALUES (?,?,?,?,?,?)').run(userId,switchId,fromWorldId,toWorldId,ids.length,work&&JSON.stringify(work));
-      return work;
-    });
+    return {userId,fromWorldId,toWorldId,switchId,ids,clockKey,clock};
+  }
+  applyMapSwitch({ids,userId,fromWorldId,clockKey,clock}){
+    const deleted=new Set(ids);
+    this.pending=this.pending.filter(point=>!deleted.has(point.id));
+    this.pendingEvents=this.pendingEvents.filter(event=>!deleted.has(event.id));
     this.forgetSatellites(ids);
     this.bodyFields.forget(userId,fromWorldId);
     if(clock)this.spatialClocks.set(clockKey,clock);
-    return {deleted:ids.length,cleanup};
+  }
+  switchMap(userId,input){
+    const plan=this.prepareMapSwitch(userId,input);
+    if(plan.result)return plan.result;
+    this.checkpoint();
+    const result=writeMapSwitch(this.db,this.store,plan,()=>{});
+    this.applyMapSwitch(plan);
+    return result;
   }
   pendingMapSwitches(){
     return this.db.prepare('SELECT user_id,id,from_world,cleanup FROM map_switches WHERE cleanup IS NOT NULL').all()

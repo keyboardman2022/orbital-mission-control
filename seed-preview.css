@@ -53,6 +53,7 @@ h1 { margin: 8px 0 7px; font-size: clamp(30px, 5vw, 44px); letter-spacing: -.04e
 .generate-button:hover { background: #c0f3ff; color: #101822; }
 .generate-button span { margin-left: 5px; }
 .generation-status { min-height: 20px; margin: 10px 0 12px; color: var(--muted); font-size: 12px; }
+.map-entry-progress { width: 100%; height: 10px; margin: 0 0 12px; accent-color: var(--cyan); }
 
 .map-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-top: 2px solid var(--cyan); border-radius: 12px; background: var(--panel); }
 .card-header { display: flex; align-items: center; gap: 12px; padding: 16px; }

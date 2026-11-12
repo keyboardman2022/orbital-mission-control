@@ -3,6 +3,7 @@ const http=require('node:http');
 const {Worker}=require('node:worker_threads');
 const {join,resolve,basename}=require('node:path');
 const {mkdirSync,openSync,writeFileSync,closeSync,readFileSync,unlinkSync,existsSync,statSync,createReadStream,readdirSync}=require('node:fs');
+const {unlink}=require('node:fs/promises');
 const {timingSafeEqual}=require('node:crypto');
 const {createStreamState,buildSnapshot}=require('./stream-snapshot.js');
 const {archivePath}=require('./trajectory-store.js');
@@ -34,17 +35,21 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
   const unlock=acquireLock(dataDir),filename=join(dataDir,'orbital.sqlite');
   const worker=new Worker(join(__dirname,'simulation-worker.js'),{workerData:{filename,maxActive,velocityRelativeTolerance}});
   let rpcId=0,alive=true,closing=false;const pending=new Map(),streams=new Set(),exportWorkers=new Map(),exportQueue=[];
-  const rpc=(method,...args)=>new Promise((resolve,reject)=>{
+  const call=(method,args,onProgress)=>new Promise((resolve,reject)=>{
     if(!alive)return reject(error(503,'模拟服务暂不可用'));
     if(pending.size>=1000)return reject(error(503,'请求队列已满，请稍后重试'));
-    const id=++rpcId,timeout=setTimeout(()=>{pending.delete(id);reject(error(503,'服务器忙，请稍后重试'));},30000);
-    pending.set(id,{resolve,reject,timeout});worker.postMessage({id,method,args});
+    const id=++rpcId;
+    const timeout=method==='switchMap'?null:setTimeout(()=>{pending.delete(id);reject(error(503,'服务器忙，请稍后重试'));},30000);
+    pending.set(id,{resolve,reject,timeout,onProgress});worker.postMessage({id,method,args});
   });
+  const rpc=(method,...args)=>call(method,args);
   const ready=new Promise((resolve,reject)=>{
     worker.on('message',message=>{
       if(message.type==='ready')resolve();
       if(message.type==='fatal'){alive=false;reject(new Error(message.message));console.error('模拟服务停止：',message.message);worker.terminate();}
-      const p=pending.get(message.id);if(p){clearTimeout(p.timeout);pending.delete(message.id);message.error?p.reject(error(message.error.status,message.error.message)):p.resolve(message.result);}
+      const p=pending.get(message.id);
+      if(p&&message.progress){p.onProgress?.(message.progress);return;}
+      if(p){clearTimeout(p.timeout);pending.delete(message.id);message.error?p.reject(error(message.error.status,message.error.message)):p.resolve(message.result);}
     });
     worker.on('error',e=>{alive=false;reject(e);for(const p of pending.values()){clearTimeout(p.timeout);p.reject(error(503,'模拟服务异常'));}pending.clear();});
     worker.on('exit',()=>{alive=false;for(const p of pending.values()){clearTimeout(p.timeout);p.reject(error(503,'模拟服务已停止'));}pending.clear();});
@@ -80,11 +85,21 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
     const active=[...exportWorkers].filter(([,record])=>removed.has(record.satelliteId)).map(([worker])=>worker.terminate());
     await Promise.allSettled(active);
   }
-  async function completeMapSwitch({userId,switchId,fromWorldId,cleanup}){
+  async function completeMapSwitch({userId,switchId,fromWorldId,cleanup},progress=()=>{}){
     await cancelSatelliteExports(cleanup.ids);
     try{
-      for(const file of cleanup.archives)unlinkIfPresent(archivePath(filename,file));
-      removeExportFiles(cleanup.exportIds,{strict:true});
+      const total=cleanup.archives.length+cleanup.exportIds.length*4;
+      let removed=0;
+      progress({stage:'files',removed,total});
+      async function removeFile(path){
+        try{await unlink(path);}catch(error){if(error.code!=='ENOENT')throw error;}
+        removed++;
+        if(removed%32===0||removed===total)progress({stage:'files',removed,total});
+      }
+      for(const file of cleanup.archives)await removeFile(archivePath(filename,file));
+      for(const id of cleanup.exportIds)for(const suffix of ['.json','.csv','.json.partial','.csv.partial']){
+        await removeFile(join(exportsDir,id+suffix));
+      }
     }catch(e){
       console.error('清理原地图文件失败：',e.message);
       throw error(503,'原地图的文件暂未清理完成，请重试切换。');
@@ -144,9 +159,23 @@ async function startServer({port=Number(process.env.PORT||4174),host=process.env
       if(path==='/api/session'&&req.method==='GET')return json(res,200,{csrfToken:auth.csrfToken});
       if(path==='/api/worlds/switch'&&req.method==='POST'){
         rate(req,'map-switch',60);const input=await body(req);
-        const {deleted,cleanup}=await rpc('switchMap',auth.userId,input);
-        if(cleanup)await completeMapSwitch({userId:auth.userId,switchId:input.switchId,fromWorldId:input.fromWorldId,cleanup});
-        return json(res,200,{deleted});
+        const streaming=req.headers.accept==='application/x-ndjson';
+        const progress=message=>{if(streaming&&!res.destroyed)res.write(JSON.stringify(message)+'\n');};
+        if(streaming){
+          res.writeHead(200,{'Content-Type':'application/x-ndjson; charset=utf-8','Cache-Control':'no-store','X-Accel-Buffering':'no'});
+          progress({stage:'waiting'});
+        }
+        const heartbeat=streaming?setInterval(()=>progress({stage:'heartbeat'}),4000):null;
+        try{
+          const {deleted,cleanup}=await call('switchMap',[auth.userId,input],progress);
+          if(cleanup)await completeMapSwitch({userId:auth.userId,switchId:input.switchId,fromWorldId:input.fromWorldId,cleanup},progress);
+          if(!streaming)return json(res,200,{deleted});
+          progress({stage:'done',deleted});
+        }catch(failure){
+          if(!streaming)throw failure;
+          progress({stage:'error',message:failure.status?failure.message:'原地图数据未能清理，请重试。'});
+        }finally{clearInterval(heartbeat);if(streaming)res.end();}
+        return;
       }
       if(path==='/api/session/recover'&&req.method==='POST'){
         rate(req,'recovery',10);const input=await body(req),result=await rpc('recover',input.recoveryKey);await rpc('logout',token);cookie(res,result.token);const {token:secret,...safe}=result;return json(res,200,safe);
